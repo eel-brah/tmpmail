@@ -1,0 +1,15 @@
+# Daily check that the free providers still work, so a dead backend is
+# noticed before users hit it (the way 1secmail broke the original tmpmail).
+name: providers
+on:
+  schedule:
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: ./scripts/smoke.sh

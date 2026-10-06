@@ -1,0 +1,523 @@
+//! mail.tm (and mail.gw, which runs the same software). Documented REST API:
+//! https://docs.mail.tm — private inboxes behind address+password and a JWT.
+//! Its terms ask clients to credit mail.tm, which the README and `--help` do.
+
+use serde_json::{Value, json};
+
+use super::{
+    Attachment, Capabilities, CreateOpts, Inbox, Message, Provider, Summary, parse_date,
+    random_password, random_user, str_field,
+};
+use crate::error::{Error, Result};
+use crate::http::Http;
+
+const PAGE_SIZE: usize = 30;
+const MAX_PAGES: usize = 5;
+
+pub struct MailTm {
+    id: &'static str,
+    name: &'static str,
+    website: &'static str,
+    base: String,
+    http: Http,
+}
+
+impl MailTm {
+    pub fn tm() -> Self {
+        Self::with_base(
+            "mailtm",
+            "mail.tm",
+            "https://mail.tm",
+            "https://api.mail.tm",
+        )
+    }
+
+    pub fn gw() -> Self {
+        Self::with_base(
+            "mailgw",
+            "mail.gw",
+            "https://mail.gw",
+            "https://api.mail.gw",
+        )
+    }
+
+    fn with_base(id: &'static str, name: &'static str, website: &'static str, base: &str) -> Self {
+        let env = format!("TMPMAIL_{}_URL", id.to_uppercase());
+        let base = std::env::var(env).unwrap_or_else(|_| base.to_string());
+        MailTm {
+            id,
+            name,
+            website,
+            base: base.trim_end_matches('/').to_string(),
+            http: Http::new(id),
+        }
+    }
+
+    fn url(&self, path: &str) -> String {
+        format!("{}{}", self.base, path)
+    }
+
+    fn token(&self, address: &str, password: &str) -> Result<(String, String)> {
+        let v: Value = self.http.json(|| {
+            self.http
+                .client()
+                .post(self.url("/token"))
+                .json(&json!({ "address": address, "password": password }))
+        })?;
+        let token = str_field(&v, "token");
+        if token.is_empty() {
+            return Err(self.http.bad("token missing from /token response"));
+        }
+        Ok((token.to_string(), str_field(&v, "id").to_string()))
+    }
+
+    /// Runs an authenticated request, refreshing the JWT once if it expired.
+    fn authed<T>(&self, inbox: &mut Inbox, call: impl Fn(&str) -> Result<T>) -> Result<T> {
+        if let Some(token) = inbox.cred_str("token") {
+            match call(token) {
+                Err(Error::Auth { .. }) => {}
+                other => return other,
+            }
+        }
+        let password = inbox
+            .cred_str("password")
+            .ok_or_else(|| {
+                self.http
+                    .bad("stored inbox has no password, cannot refresh token")
+            })?
+            .to_string();
+        let (token, account_id) = self.token(&inbox.address, &password)?;
+        inbox.set_cred("token", token.clone());
+        if !account_id.is_empty() {
+            inbox.set_cred("account_id", account_id);
+        }
+        call(&token)
+    }
+
+    fn summary(v: &Value) -> Summary {
+        Summary {
+            id: str_field(v, "id").to_string(),
+            from: format_addr(&v["from"]),
+            subject: str_field(v, "subject").to_string(),
+            intro: str_field(v, "intro").to_string(),
+            date: parse_date(&v["createdAt"]),
+            seen: v["seen"].as_bool().unwrap_or(false),
+            has_attachments: v["hasAttachments"].as_bool().unwrap_or(false),
+        }
+    }
+}
+
+fn format_addr(v: &Value) -> String {
+    let addr = str_field(v, "address");
+    match str_field(v, "name") {
+        "" => addr.to_string(),
+        name => format!("{name} <{addr}>"),
+    }
+}
+
+/// Hydra endpoints return a bare array with `Accept: application/json`, but
+/// accept the JSON-LD envelope too in case that changes.
+fn members(v: Value) -> Vec<Value> {
+    match v {
+        Value::Array(a) => a,
+        mut other => match other.get_mut("hydra:member").map(Value::take) {
+            Some(Value::Array(a)) => a,
+            _ => Vec::new(),
+        },
+    }
+}
+
+impl Provider for MailTm {
+    fn id(&self) -> &'static str {
+        self.id
+    }
+    fn name(&self) -> &'static str {
+        self.name
+    }
+    fn website(&self) -> &'static str {
+        self.website
+    }
+
+    fn caps(&self) -> Capabilities {
+        Capabilities {
+            private: true,
+            custom_user: true,
+            choose_domain: true,
+            attachments: true,
+            raw: true,
+            delete_message: true,
+            delete_inbox: true,
+            login: true,
+            lifetime: "until deleted; messages kept 7 days",
+        }
+    }
+
+    fn domains(&self) -> Result<Vec<String>> {
+        let v: Value = self.http.json(|| {
+            self.http
+                .client()
+                .get(self.url("/domains"))
+                .header("Accept", "application/json")
+        })?;
+        let domains: Vec<String> = members(v)
+            .iter()
+            .filter(|d| d["isActive"].as_bool().unwrap_or(true))
+            .map(|d| str_field(d, "domain").to_string())
+            .filter(|d| !d.is_empty())
+            .collect();
+        if domains.is_empty() {
+            return Err(self.http.bad("no active domains"));
+        }
+        Ok(domains)
+    }
+
+    fn create(&self, opts: &CreateOpts) -> Result<Inbox> {
+        let domains = self.domains()?;
+        let domain = match &opts.domain {
+            Some(d) if domains.contains(d) => d.clone(),
+            Some(d) => {
+                return Err(Error::Usage(format!(
+                    "{}: domain {d:?} not available, choose one of: {}",
+                    self.id,
+                    domains.join(", ")
+                )));
+            }
+            None => domains[rand::random_range(0..domains.len())].clone(),
+        };
+        let password = opts.password.clone().unwrap_or_else(random_password);
+        // mail.tm rejects some usernames (a word filter: "steadymoose" fails,
+        // "quietotter" passes), so a random name gets a few fresh tries.
+        let attempts = if opts.user.is_some() { 1 } else { 4 };
+        let mut address = String::new();
+        for attempt in 1..=attempts {
+            let user = opts.user.clone().unwrap_or_else(random_user).to_lowercase();
+            address = format!("{user}@{domain}");
+            let created = self.http.json::<Value>(|| {
+                self.http
+                    .client()
+                    .post(self.url("/accounts"))
+                    .json(&json!({ "address": address, "password": password }))
+            });
+            match created {
+                Ok(_) => break,
+                // 422 = address already used or rejected.
+                Err(Error::BadResponse { detail, .. }) if detail.starts_with("HTTP 422") => {
+                    if attempt == attempts {
+                        return Err(Error::AddressTaken(format!(
+                            "{}: {address} is taken or invalid ({detail})",
+                            self.id
+                        )));
+                    }
+                }
+                Err(e) => return Err(e),
+            }
+        }
+
+        let (token, account_id) = self.token(&address, &password)?;
+        Ok(Inbox::new(
+            self.id,
+            address,
+            json!({ "password": password, "token": token, "account_id": account_id }),
+        ))
+    }
+
+    fn login(&self, address: &str, password: &str) -> Result<Inbox> {
+        let (token, account_id) = self.token(address, password)?;
+        Ok(Inbox::new(
+            self.id,
+            address.to_string(),
+            json!({ "password": password, "token": token, "account_id": account_id }),
+        ))
+    }
+
+    fn list(&self, inbox: &mut Inbox) -> Result<Vec<Summary>> {
+        let mut all = Vec::new();
+        for page in 1..=MAX_PAGES {
+            let batch: Value = self.authed(inbox, |token| {
+                self.http.json(|| {
+                    self.http
+                        .client()
+                        .get(self.url("/messages"))
+                        .query(&[("page", page)])
+                        .header("Accept", "application/json")
+                        .bearer_auth(token)
+                })
+            })?;
+            let batch = members(batch);
+            let n = batch.len();
+            all.extend(batch.iter().map(Self::summary));
+            if n < PAGE_SIZE {
+                break;
+            }
+        }
+        Ok(all)
+    }
+
+    fn get(&self, inbox: &mut Inbox, id: &str) -> Result<Message> {
+        let path = format!("/messages/{id}");
+        let v: Value = self.authed(inbox, |token| {
+            self.http.json(|| {
+                self.http
+                    .client()
+                    .get(self.url(&path))
+                    .header("Accept", "application/json")
+                    .bearer_auth(token)
+            })
+        })?;
+        let html = match &v["html"] {
+            Value::Array(parts) => {
+                let joined: String = parts.iter().filter_map(Value::as_str).collect();
+                (!joined.is_empty()).then_some(joined)
+            }
+            Value::String(s) if !s.is_empty() => Some(s.clone()),
+            _ => None,
+        };
+        let attachments = v["attachments"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .map(|att| Attachment {
+                        id: str_field(att, "id").to_string(),
+                        filename: str_field(att, "filename").to_string(),
+                        content_type: str_field(att, "contentType").to_string(),
+                        size: att["size"].as_u64(),
+                        url: match str_field(att, "downloadUrl") {
+                            "" => None,
+                            u if u.starts_with("http") => Some(u.to_string()),
+                            u => Some(self.url(u)),
+                        },
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        Ok(Message {
+            id: str_field(&v, "id").to_string(),
+            from: format_addr(&v["from"]),
+            to: v["to"]
+                .as_array()
+                .map(|a| a.iter().map(format_addr).collect())
+                .unwrap_or_default(),
+            subject: str_field(&v, "subject").to_string(),
+            date: parse_date(&v["createdAt"]),
+            text: v["text"]
+                .as_str()
+                .filter(|s| !s.is_empty())
+                .map(str::to_string),
+            html,
+            attachments,
+        })
+    }
+
+    fn raw(&self, inbox: &mut Inbox, id: &str) -> Result<Vec<u8>> {
+        let path = format!("/sources/{id}");
+        let v: Value = self.authed(inbox, |token| {
+            self.http.json(|| {
+                self.http
+                    .client()
+                    .get(self.url(&path))
+                    .header("Accept", "application/json")
+                    .bearer_auth(token)
+            })
+        })?;
+        match v["data"].as_str() {
+            Some(data) => Ok(data.as_bytes().to_vec()),
+            None => Err(self.http.bad("message source missing `data`")),
+        }
+    }
+
+    fn attachment(&self, inbox: &mut Inbox, msg: &Message, att: &Attachment) -> Result<Vec<u8>> {
+        let url = att
+            .url
+            .clone()
+            .unwrap_or_else(|| self.url(&format!("/messages/{}/attachment/{}", msg.id, att.id)));
+        self.authed(inbox, |token| {
+            self.http
+                .bytes(|| self.http.client().get(&url).bearer_auth(token))
+        })
+    }
+
+    fn delete_message(&self, inbox: &mut Inbox, id: &str) -> Result<()> {
+        let path = format!("/messages/{id}");
+        self.authed(inbox, |token| {
+            self.http
+                .send(|| {
+                    self.http
+                        .client()
+                        .delete(self.url(&path))
+                        .bearer_auth(token)
+                })
+                .map(|_| ())
+        })
+    }
+
+    fn delete_inbox(&self, inbox: &mut Inbox) -> Result<()> {
+        if inbox.cred_str("account_id").is_none() {
+            // Older state without an id: a token refresh returns it.
+            self.authed(inbox, |_| Ok(()))?;
+        }
+        let account = inbox.cred_str("account_id").unwrap_or_default().to_string();
+        if account.is_empty() {
+            return Err(self.http.bad("account id unknown"));
+        }
+        let path = format!("/accounts/{account}");
+        self.authed(inbox, |token| {
+            self.http
+                .send(|| {
+                    self.http
+                        .client()
+                        .delete(self.url(&path))
+                        .bearer_auth(token)
+                })
+                .map(|_| ())
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mockito::{Matcher, Server};
+
+    fn provider(server: &Server) -> MailTm {
+        MailTm {
+            id: "mailtm",
+            name: "mail.tm",
+            website: "https://mail.tm",
+            base: server.url(),
+            http: Http::new("mailtm"),
+        }
+    }
+
+    #[test]
+    fn create_list_and_read() {
+        let mut s = Server::new();
+        s.mock("GET", "/domains")
+            .with_body(r#"[{"domain":"maxxspace.com","isActive":true}]"#)
+            .create();
+        s.mock("POST", "/accounts")
+            .match_body(Matcher::PartialJson(
+                json!({"address":"otter1@maxxspace.com"}),
+            ))
+            .with_status(201)
+            .with_body(r#"{"id":"acc1","address":"otter1@maxxspace.com"}"#)
+            .create();
+        s.mock("POST", "/token")
+            .with_body(r#"{"token":"jwt1","id":"acc1"}"#)
+            .create();
+        s.mock("GET", "/messages")
+            .match_query(Matcher::UrlEncoded("page".into(), "1".into()))
+            .match_header("authorization", "Bearer jwt1")
+            .with_body(
+                r#"[{"id":"m1","from":{"address":"a@b.c","name":"Ann"},"subject":"Hi",
+                "intro":"hello","seen":false,"hasAttachments":true,
+                "createdAt":"2026-10-05T10:00:00+00:00"}]"#,
+            )
+            .create();
+        s.mock("GET", "/messages/m1")
+            .with_body(
+                r#"{"id":"m1","from":{"address":"a@b.c","name":""},"to":[{"address":"otter1@maxxspace.com","name":""}],
+                "subject":"Hi","text":"Your code is 123456","html":["<p>Your code</p>"," is 123456"],
+                "createdAt":"2026-10-05T10:00:00+00:00",
+                "attachments":[{"id":"ATT1","filename":"a.txt","contentType":"text/plain","size":3,
+                "downloadUrl":"/messages/m1/attachment/ATT1"}]}"#,
+            )
+            .create();
+
+        let p = provider(&s);
+        let mut inbox = p
+            .create(&CreateOpts {
+                user: Some("Otter1".into()),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(inbox.address, "otter1@maxxspace.com");
+        assert_eq!(inbox.cred_str("account_id"), Some("acc1"));
+
+        let list = p.list(&mut inbox).unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].from, "Ann <a@b.c>");
+        assert!(list[0].has_attachments);
+
+        let msg = p.get(&mut inbox, "m1").unwrap();
+        assert_eq!(msg.html.as_deref(), Some("<p>Your code</p> is 123456"));
+        assert_eq!(msg.to, vec!["otter1@maxxspace.com"]);
+        assert_eq!(
+            msg.attachments[0].url.as_deref(),
+            Some(format!("{}/messages/m1/attachment/ATT1", s.url()).as_str())
+        );
+    }
+
+    #[test]
+    fn refreshes_expired_token_once() {
+        let mut s = Server::new();
+        s.mock("GET", "/messages")
+            .match_query(Matcher::Any)
+            .match_header("authorization", "Bearer old")
+            .with_status(401)
+            .with_body(r#"{"message":"Expired JWT Token"}"#)
+            .create();
+        let fresh = s
+            .mock("POST", "/token")
+            .with_body(r#"{"token":"new","id":"acc9"}"#)
+            .expect(1)
+            .create();
+        s.mock("GET", "/messages")
+            .match_query(Matcher::Any)
+            .match_header("authorization", "Bearer new")
+            .with_body("[]")
+            .create();
+
+        let p = provider(&s);
+        let mut inbox = Inbox::new(
+            "mailtm",
+            "x@maxxspace.com".into(),
+            json!({"password":"pw","token":"old"}),
+        );
+        assert!(p.list(&mut inbox).unwrap().is_empty());
+        assert_eq!(inbox.cred_str("token"), Some("new"));
+        assert_eq!(inbox.cred_str("account_id"), Some("acc9"));
+        fresh.assert();
+    }
+
+    #[test]
+    fn taken_address_is_reported_clearly() {
+        let mut s = Server::new();
+        s.mock("GET", "/domains")
+            .with_body(r#"[{"domain":"maxxspace.com","isActive":true}]"#)
+            .create();
+        s.mock("POST", "/accounts")
+            .with_status(422)
+            .with_body(r#"{"hydra:description":"address: This value is already used."}"#)
+            .create();
+        let err = provider(&s)
+            .create(&CreateOpts {
+                user: Some("taken".into()),
+                ..Default::default()
+            })
+            .unwrap_err();
+        assert!(matches!(err, Error::AddressTaken(_)), "{err:?}");
+        assert!(err.to_string().contains("already used"));
+    }
+
+    #[test]
+    fn html_error_page_is_not_reported_as_json_garbage() {
+        let mut s = Server::new();
+        s.mock("GET", "/domains")
+            .with_body("<html>Service unavailable</html>")
+            .create();
+        let err = provider(&s).domains().unwrap_err();
+        assert!(
+            err.to_string().contains("HTML page instead of JSON"),
+            "{err}"
+        );
+        assert!(err.is_provider_failure());
+    }
+
+    #[test]
+    fn server_error_counts_as_unreachable() {
+        let mut s = Server::new();
+        s.mock("GET", "/domains").with_status(502).create();
+        let err = provider(&s).domains().unwrap_err();
+        assert!(matches!(err, Error::Unreachable { .. }), "{err:?}");
+    }
+}

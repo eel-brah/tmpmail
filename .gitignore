@@ -1,0 +1,10 @@
+/target
+
+# Claude Code files
+.claude/
+CLAUDE.md
+CLAUDE.local.md
+.mcp.json
+
+# Local planning notes
+mds/
