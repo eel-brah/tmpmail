@@ -70,8 +70,9 @@ impl Config {
         }
     }
 
-    pub fn poll_interval(&self) -> u64 {
-        self.poll_interval.unwrap_or(5).max(2)
+    /// Seconds between checks: the command-line value, else the config, at least 2.
+    pub fn poll_interval(&self, cli: Option<u64>) -> u64 {
+        cli.or(self.poll_interval).unwrap_or(5).max(2)
     }
 
     pub fn timeout(&self) -> u64 {

@@ -100,7 +100,7 @@ pub fn open(target: &str, browser: Option<&str>) -> anyhow::Result<()> {
 }
 
 pub fn notify(title: &str, body: &str) {
-    let result = if on_path("notify-send") {
+    let _ = if on_path("notify-send") {
         Command::new("notify-send")
             .args(["--app-name=tmpmail", title, body])
             .status()
@@ -117,7 +117,6 @@ pub fn notify(title: &str, body: &str) {
     } else {
         return;
     };
-    let _ = result;
 }
 
 /// Writes a viewer file readable only by the user and returns its path.

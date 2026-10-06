@@ -12,7 +12,7 @@ use crate::cli::*;
 use crate::config::Config;
 use crate::error::{Error, Result};
 use crate::extract;
-use crate::provider::{self, CreateOpts, Inbox, Message, Provider, Summary};
+use crate::provider::{self, Capabilities, CreateOpts, Inbox, Message, Provider, Summary};
 use crate::render::{body_text, clean, clean_line, safe_filename, safe_html_document};
 use crate::store::{State, Store};
 use crate::system;
@@ -36,6 +36,26 @@ struct InboxView<'a> {
     expired: bool,
     active: bool,
     private: bool,
+}
+
+/// One line of `tmpmail providers`.
+#[derive(Serialize)]
+struct ProviderRow {
+    id: &'static str,
+    name: &'static str,
+    website: &'static str,
+    in_fallback_order: Option<usize>,
+    capabilities: Capabilities,
+    status: Option<Health>,
+}
+
+#[derive(Serialize)]
+struct Health {
+    ok: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
 }
 
 impl App {
@@ -214,16 +234,39 @@ impl App {
         }
     }
 
-    fn fetch(&mut self, msg: &MessageRef) -> Result<Message> {
-        let id = msg.id.clone();
+    /// Runs `f` on the message `id` resolves to in the selected inbox.
+    fn with_message<T>(
+        &mut self,
+        id: Option<&str>,
+        f: impl FnOnce(&dyn Provider, &mut Inbox, &str) -> Result<T>,
+    ) -> Result<T> {
         self.with_inbox(|p, inbox| {
-            let id = Self::resolve_id(p, inbox, id.as_deref())?;
-            p.get(inbox, &id)
+            let id = Self::resolve_id(p, inbox, id)?;
+            f(p, inbox, &id)
         })
+    }
+
+    fn fetch(&mut self, msg: &MessageRef) -> Result<Message> {
+        self.with_message(msg.id.as_deref(), |p, inbox, id| p.get(inbox, id))
     }
 
     fn save_state(&self) -> Result<()> {
         self.store.save(&self.state)
+    }
+
+    /// Stores `inbox` as the active one and prints it.
+    fn activate(&mut self, inbox: &Inbox, copy: bool) -> Result<()> {
+        self.state.add(inbox.clone());
+        self.save_state()?;
+        if copy {
+            system::copy(&inbox.address, self.clipboard_cmd().as_deref())?;
+        }
+        if self.global.json {
+            self.json_out(&self.view(inbox));
+        } else {
+            println!("{}", inbox.address);
+        }
+        Ok(())
     }
 
     // ---------- commands ----------
@@ -242,20 +285,11 @@ impl App {
             domain,
             password: a.password,
         };
-        let inbox = self.create_with_fallback(a.provider.as_deref(), &opts)?;
-        let mut inbox = inbox;
+        let mut inbox = self.create_with_fallback(a.provider.as_deref(), &opts)?;
         inbox.label = a.label;
         let p = provider::get(&inbox.provider)?;
-        self.state.add(inbox.clone());
-        self.save_state()?;
-
-        if a.copy {
-            system::copy(&inbox.address, self.clipboard_cmd().as_deref())?;
-        }
-        if self.global.json {
-            self.json_out(&self.view(&inbox));
-        } else {
-            println!("{}", inbox.address);
+        self.activate(&inbox, a.copy)?;
+        if !self.global.json {
             if !p.caps().private {
                 self.warn(&format!(
                     "warning: {} inboxes are public, anyone who knows this address can read its mail",
@@ -298,7 +332,7 @@ impl App {
                     failures.push(e.to_string());
                 }
                 // A requested domain may belong to a later provider.
-                Err(Error::Usage(msg)) if opts.domain.is_some() => failures.push(msg),
+                Err(e @ Error::DomainUnavailable { .. }) => failures.push(e.to_string()),
                 Err(e) => return Err(e),
             }
         }
@@ -406,11 +440,7 @@ impl App {
 
     fn read(&mut self, a: ReadArgs) -> Result<()> {
         if a.raw {
-            let id = a.msg.id.clone();
-            let raw = self.with_inbox(|p, inbox| {
-                let id = Self::resolve_id(p, inbox, id.as_deref())?;
-                p.raw(inbox, &id)
-            })?;
+            let raw = self.with_message(a.msg.id.as_deref(), |p, inbox, id| p.raw(inbox, id))?;
             std::io::stdout()
                 .write_all(&raw)
                 .map_err(anyhow::Error::from)?;
@@ -476,47 +506,34 @@ impl App {
 
     fn wait_cmd(&mut self, a: WaitArgs) -> Result<()> {
         let otp_re = a.otp_regex.as_deref().map(compile_plain).transpose()?;
-        let want_otp = a.otp;
-        let want_link = a.link;
-        let (n, msg) = self.wait_for(&a.filter, |m| {
-            let (subject, body) = (&m.subject, message_body(m));
+        let (want_otp, want_link) = (a.otp, a.link);
+        // `Some(found)` accepts the message; `found` is the code or link asked for.
+        let (n, msg, found) = self.wait_for(&a.filter, |m, body| {
             if want_otp {
-                extract::otp(subject, &body, otp_re.as_ref()).is_some()
+                extract::otp(&m.subject, body, otp_re.as_ref()).map(Some)
             } else if want_link {
-                !extract::links(
-                    m.text.as_deref().unwrap_or_default(),
-                    m.html.as_deref().unwrap_or_default(),
-                )
-                .is_empty()
+                message_links(m).into_iter().next().map(Some)
             } else {
-                true
+                Some(None)
             }
         })?;
 
-        if want_otp {
-            let code = extract::otp(&msg.subject, &message_body(&msg), otp_re.as_ref())
-                .unwrap_or_default();
-            self.print_code(&code, &msg, n);
-        } else if want_link {
-            let link = extract::links(
-                msg.text.as_deref().unwrap_or_default(),
-                msg.html.as_deref().unwrap_or_default(),
-            )
-            .into_iter()
-            .next()
-            .unwrap_or_default();
+        let inbox = self.state.inboxes[n].address.clone();
+        if let Some(code) = found.as_deref().filter(|_| want_otp) {
+            self.print_code(code, &msg, &inbox);
+        } else if let Some(link) = found {
             if self.global.json {
                 self.json_out(&json!({
                     "link": link,
                     "message_id": msg.id,
-                    "inbox": self.state.inboxes[n].address,
+                    "inbox": inbox,
                 }));
             } else {
                 println!("{}", clean_line(&link));
             }
         } else if self.global.json {
             let mut v = serde_json::to_value(&msg).expect("serializable");
-            v["inbox"] = json!(self.state.inboxes[n].address);
+            v["inbox"] = json!(inbox);
             self.json_out(&v);
         } else {
             self.print_message(&msg);
@@ -528,14 +545,15 @@ impl App {
         Ok(())
     }
 
-    fn print_code(&self, code: &str, msg: &Message, n: usize) {
+    fn print_code(&self, code: &str, msg: &Message, inbox: &str) {
         if self.global.json {
             self.json_out(&json!({
                 "code": code,
+                "candidates": extract::otp_candidates(&msg.subject, &message_body(msg)),
+                "inbox": inbox,
                 "message_id": msg.id,
                 "from": msg.from,
                 "subject": msg.subject,
-                "inbox": self.state.inboxes[n].address,
             }));
         } else {
             println!("{}", clean_line(code));
@@ -543,20 +561,18 @@ impl App {
     }
 
     /// Polls the target inbox(es) until a message passes the filter and
-    /// `accept`, or times out. Returns the inbox index and the message.
-    fn wait_for(
+    /// `accept` (given the message and its body text) returns `Some`, or
+    /// times out. Returns the inbox index, the message and what `accept` found.
+    fn wait_for<T>(
         &mut self,
         f: &WaitFilter,
-        accept: impl Fn(&Message) -> bool,
-    ) -> Result<(usize, Message)> {
+        accept: impl Fn(&Message, &str) -> Option<T>,
+    ) -> Result<(usize, Message, T)> {
         let from = f.from.as_deref().map(compile).transpose()?;
         let subject = f.subject.as_deref().map(compile).transpose()?;
         let body = f.body.as_deref().map(compile).transpose()?;
         let timeout = f.timeout.unwrap_or_else(|| self.config.timeout());
-        let interval = f
-            .interval
-            .unwrap_or_else(|| self.config.poll_interval())
-            .max(2);
+        let interval = self.config.poll_interval(f.interval);
         let deadline = Instant::now() + Duration::from_secs(timeout);
         let all = f.all_inboxes;
         let mut targets = self.targets(all)?;
@@ -575,31 +591,16 @@ impl App {
         if targets.is_empty() {
             return Err(Error::NotFound("no usable inbox to wait on".into()));
         }
-        let what = if targets.len() == 1 {
-            self.state.inboxes[targets[0]].address.clone()
-        } else {
-            format!("{} inboxes", targets.len())
-        };
         self.note(&format!(
-            "waiting for mail to {what} (timeout {timeout}s)..."
+            "waiting for mail to {} (timeout {timeout}s)...",
+            self.targets_label(&targets)
         ));
 
-        let mut warned: HashSet<usize> = HashSet::new();
+        let mut failing: HashSet<usize> = HashSet::new();
         loop {
             for n in targets.clone() {
-                let list = match self.with_inbox_at(n, |p, inbox| Self::sorted_list(p, inbox)) {
-                    Ok(list) => list,
-                    Err(e) if e.is_provider_failure() => {
-                        if warned.insert(n) {
-                            self.warn(&format!("{e}; retrying until the timeout"));
-                        }
-                        continue;
-                    }
-                    Err(e) if all => {
-                        self.skip_or_warn(&mut targets, n, &e);
-                        continue;
-                    }
-                    Err(e) => return Err(e),
+                let Some(list) = self.poll(n, &mut targets, &mut failing, all)? else {
+                    continue;
                 };
                 // Oldest first, so the first matching arrival wins.
                 for s in list.iter().rev() {
@@ -619,17 +620,15 @@ impl App {
                         Err(e) => return Err(e),
                     };
                     seen.insert(key);
-                    if body
-                        .as_ref()
-                        .is_some_and(|re| !re.is_match(&message_body(&msg)))
-                    {
+                    let text = message_body(&msg);
+                    if body.as_ref().is_some_and(|re| !re.is_match(&text)) {
                         continue;
                     }
-                    if accept(&msg) {
+                    if let Some(found) = accept(&msg, &text) {
                         if all {
                             self.note(&format!("received by {}", self.state.inboxes[n].address));
                         }
-                        return Ok((n, msg));
+                        return Ok((n, msg, found));
                     }
                 }
             }
@@ -648,6 +647,47 @@ impl App {
         }
     }
 
+    /// Lists inbox `n` for a polling loop. A temporary provider failure is
+    /// warned about once and yields `None`; in multi-inbox mode other errors
+    /// go through `skip_or_warn`.
+    fn poll(
+        &mut self,
+        n: usize,
+        targets: &mut Vec<usize>,
+        failing: &mut HashSet<usize>,
+        multi: bool,
+    ) -> Result<Option<Vec<Summary>>> {
+        match self.with_inbox_at(n, |p, inbox| Self::sorted_list(p, inbox)) {
+            Ok(list) => {
+                if failing.remove(&n) {
+                    self.note(&format!(
+                        "{} reachable again",
+                        self.state.inboxes[n].address
+                    ));
+                }
+                Ok(Some(list))
+            }
+            Err(e) if e.is_provider_failure() => {
+                if failing.insert(n) {
+                    self.warn(&format!("{e}; will keep trying"));
+                }
+                Ok(None)
+            }
+            Err(e) if multi => {
+                self.skip_or_warn(targets, n, &e);
+                Ok(None)
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    fn targets_label(&self, targets: &[usize]) -> String {
+        match targets {
+            [n] => self.state.inboxes[*n].address.clone(),
+            _ => format!("{} inboxes", targets.len()),
+        }
+    }
+
     /// In multi-inbox mode: stop polling an inbox that is gone for good,
     /// and only warn about temporary failures.
     fn skip_or_warn(&self, targets: &mut Vec<usize>, n: usize, e: &Error) {
@@ -662,30 +702,19 @@ impl App {
 
     fn otp(&mut self, a: OtpArgs) -> Result<()> {
         let re = a.regex.as_deref().map(compile_plain).transpose()?;
-        let (inbox, msg) = if a.wait {
-            let (n, msg) = self.wait_for(&a.filter, |m| {
-                extract::otp(&m.subject, &message_body(m), re.as_ref()).is_some()
+        let (inbox, msg, code) = if a.wait {
+            let (n, msg, code) = self.wait_for(&a.filter, |m, body| {
+                extract::otp(&m.subject, body, re.as_ref())
             })?;
-            (self.state.inboxes[n].address.clone(), msg)
+            (self.state.inboxes[n].address.clone(), msg, Some(code))
         } else {
             let msg = self.fetch(&a.msg)?;
-            (self.current()?.address.clone(), msg)
+            let code = extract::otp(&msg.subject, &message_body(&msg), re.as_ref());
+            (self.current()?.address.clone(), msg, code)
         };
-        let body = message_body(&msg);
-        match extract::otp(&msg.subject, &body, re.as_ref()) {
+        match code {
             Some(code) => {
-                if self.global.json {
-                    self.json_out(&json!({
-                        "code": code,
-                        "candidates": extract::otp_candidates(&msg.subject, &body),
-                        "inbox": inbox,
-                        "message_id": msg.id,
-                        "from": msg.from,
-                        "subject": msg.subject,
-                    }));
-                } else {
-                    println!("{}", clean_line(&code));
-                }
+                self.print_code(&code, &msg, &inbox);
                 Ok(())
             }
             None => Err(Error::NotFound(format!(
@@ -699,10 +728,7 @@ impl App {
     fn links(&mut self, a: LinksArgs) -> Result<()> {
         let filter = a.r#match.as_deref().map(compile).transpose()?;
         let msg = self.fetch(&a.msg)?;
-        let mut links = extract::links(
-            msg.text.as_deref().unwrap_or_default(),
-            msg.html.as_deref().unwrap_or_default(),
-        );
+        let mut links = message_links(&msg);
         if let Some(re) = &filter {
             links.retain(|l| re.is_match(l));
         }
@@ -729,41 +755,22 @@ impl App {
     }
 
     fn watch(&mut self, a: WatchArgs) -> Result<()> {
-        let interval = a
-            .interval
-            .unwrap_or_else(|| self.config.poll_interval())
-            .max(2);
+        let interval = self.config.poll_interval(a.interval);
         let mut targets = self.targets(a.all_inboxes)?;
         let multi = a.all_inboxes;
         let mut seen: HashSet<(usize, String)> = HashSet::new();
         let mut first = true;
         let mut failing: HashSet<usize> = HashSet::new();
-        let what = if multi {
-            format!("{} inboxes", targets.len())
-        } else {
-            self.state.inboxes[targets[0]].address.clone()
-        };
-        self.note(&format!("watching {what}, Ctrl+C to stop"));
+        self.note(&format!(
+            "watching {}, Ctrl+C to stop",
+            self.targets_label(&targets)
+        ));
         loop {
             for n in targets.clone() {
-                let address = self.state.inboxes[n].address.clone();
-                let list = match self.with_inbox_at(n, |p, inbox| Self::sorted_list(p, inbox)) {
-                    Ok(list) => list,
-                    Err(e) if e.is_provider_failure() => {
-                        if failing.insert(n) {
-                            self.warn(&format!("{e}; will keep trying"));
-                        }
-                        continue;
-                    }
-                    Err(e) if multi => {
-                        self.skip_or_warn(&mut targets, n, &e);
-                        continue;
-                    }
-                    Err(e) => return Err(e),
+                let Some(list) = self.poll(n, &mut targets, &mut failing, multi)? else {
+                    continue;
                 };
-                if failing.remove(&n) {
-                    self.note(&format!("{address} reachable again"));
-                }
+                let address = self.state.inboxes[n].address.clone();
                 for s in list.iter().rev() {
                     if !seen.insert((n, s.id.clone())) {
                         continue;
@@ -829,13 +836,10 @@ impl App {
     }
 
     fn save(&mut self, a: SaveArgs) -> Result<()> {
-        let id = a.id.clone();
-        let wanted = a.attachments.clone();
-        let out_dir = a.output.clone();
-        std::fs::create_dir_all(&out_dir).map_err(anyhow::Error::from)?;
-        let saved = self.with_inbox(|p, inbox| {
-            let id = Self::resolve_id(p, inbox, Some(&id))?;
-            let msg = p.get(inbox, &id)?;
+        let (wanted, out_dir) = (&a.attachments, &a.output);
+        std::fs::create_dir_all(out_dir).map_err(anyhow::Error::from)?;
+        let saved = self.with_message(Some(&a.id), |p, inbox, id| {
+            let msg = p.get(inbox, id)?;
             let selected: Vec<_> = msg
                 .attachments
                 .iter()
@@ -869,20 +873,19 @@ impl App {
     }
 
     fn delete(&mut self, a: DeleteArgs) -> Result<()> {
-        let id = a.id.clone();
-        let deleted = self.with_inbox(|p, inbox| {
-            if a.all {
+        let deleted = if a.all {
+            self.with_inbox(|p, inbox| {
                 let list = p.list(inbox)?;
                 for s in &list {
                     p.delete_message(inbox, &s.id)?;
                 }
                 Ok(list.len())
-            } else {
-                let id = Self::resolve_id(p, inbox, id.as_deref())?;
-                p.delete_message(inbox, &id)?;
-                Ok(1)
-            }
-        })?;
+            })?
+        } else {
+            self.with_message(a.id.as_deref(), |p, inbox, id| {
+                p.delete_message(inbox, id).map(|()| 1)
+            })?
+        };
         if self.global.json {
             self.json_out(&json!({ "deleted": deleted }));
         } else {
@@ -948,21 +951,9 @@ impl App {
 
     fn inboxes(&mut self, a: InboxesArgs) -> Result<()> {
         if a.prune {
-            let before = self.state.inboxes.len();
-            self.state.inboxes.retain(|i| !i.is_expired());
-            if self
-                .state
-                .active
-                .as_ref()
-                .is_some_and(|act| !self.state.inboxes.iter().any(|i| &i.address == act))
-            {
-                self.state.active = self.state.inboxes.last().map(|i| i.address.clone());
-            }
+            let pruned = self.state.prune_expired();
             self.save_state()?;
-            self.note(&format!(
-                "forgot {} expired inbox(es)",
-                before - self.state.inboxes.len()
-            ));
+            self.note(&format!("forgot {pruned} expired inbox(es)"));
         }
         if self.global.json {
             let views: Vec<_> = self.state.inboxes.iter().map(|i| self.view(i)).collect();
@@ -996,10 +987,7 @@ impl App {
     }
 
     fn use_inbox(&mut self, address: &str) -> Result<()> {
-        let n = self
-            .state
-            .find(address)
-            .ok_or_else(|| Error::NotFound(format!("no stored inbox matches {address:?}")))?;
+        let n = self.state.resolve(Some(address))?;
         let address = self.state.inboxes[n].address.clone();
         self.state.active = Some(address.clone());
         self.save_state()?;
@@ -1013,11 +1001,10 @@ impl App {
 
     fn login(&mut self, a: LoginArgs) -> Result<()> {
         let id = a.provider.clone().unwrap_or_else(|| {
-            if a.address.ends_with("@maildrop.cc") {
-                "maildrop".into()
-            } else {
-                "mailtm".into()
-            }
+            provider::all()
+                .find(|id| provider::get(id).is_ok_and(|p| p.owns_address(&a.address)))
+                .unwrap_or("mailtm")
+                .to_string()
         });
         let p = provider::get(&id)?;
         let password = match (&a.password, p.caps().private) {
@@ -1031,14 +1018,7 @@ impl App {
         };
         let mut inbox = p.login(&a.address, &password)?;
         inbox.label = a.label;
-        self.state.add(inbox.clone());
-        self.save_state()?;
-        if self.global.json {
-            self.json_out(&self.view(&inbox));
-        } else {
-            println!("{}", inbox.address);
-        }
-        Ok(())
+        self.activate(&inbox, false)
     }
 
     fn drop_inbox(&mut self, a: DropArgs) -> Result<()> {
@@ -1068,7 +1048,7 @@ impl App {
         let old = self.current()?.clone();
         // Prefer the same provider, fall back like `new` does.
         let opts = CreateOpts::default();
-        let inbox = match provider::get(&old.provider)?.create(&opts) {
+        let mut inbox = match provider::get(&old.provider)?.create(&opts) {
             Ok(i) => i,
             Err(e) if e.is_provider_failure() => {
                 self.warn(&format!("{e}, trying other providers"));
@@ -1076,7 +1056,6 @@ impl App {
             }
             Err(e) => return Err(e),
         };
-        let mut inbox = inbox;
         inbox.label = old.label.clone();
         if !a.keep {
             if let Some(n) = self.state.find(&old.address) {
@@ -1084,83 +1063,86 @@ impl App {
                 let _ = provider::get(&gone.provider).map(|p| p.delete_inbox(&mut gone));
             }
         }
-        self.state.add(inbox.clone());
-        self.save_state()?;
-        if a.copy {
-            system::copy(&inbox.address, self.clipboard_cmd().as_deref())?;
-        }
-        if self.global.json {
-            self.json_out(&self.view(&inbox));
-        } else {
-            println!("{}", inbox.address);
-        }
-        Ok(())
+        self.activate(&inbox, a.copy)
     }
 
     fn providers(&mut self, a: ProvidersArgs) -> Result<()> {
         let order = self.config.provider_order();
+        // Health checks are independent network calls: run them side by side.
+        let mut health: Vec<Option<Health>> = if a.check {
+            std::thread::scope(|s| {
+                let checks: Vec<_> = provider::all()
+                    .map(|id| s.spawn(move || check_health(id)))
+                    .collect();
+                checks
+                    .into_iter()
+                    .map(|c| Some(c.join().expect("health check panicked")))
+                    .collect()
+            })
+        } else {
+            provider::all().map(|_| None).collect()
+        };
         let mut rows = Vec::new();
-        for id in provider::ALL {
+        for (id, status) in provider::all().zip(health.drain(..)) {
             let p = provider::get(id)?;
-            let status = if a.check {
-                let start = Instant::now();
-                Some(match p.health() {
-                    Ok(()) => json!({ "ok": true, "ms": start.elapsed().as_millis() as u64 }),
-                    Err(e) => json!({ "ok": false, "error": e.to_string() }),
-                })
-            } else {
-                None
-            };
-            rows.push(json!({
-                "id": id,
-                "name": p.name(),
-                "website": p.website(),
-                "in_fallback_order": order.iter().position(|o| o == id).map(|n| n + 1),
-                "capabilities": p.caps(),
-                "status": status,
-            }));
+            rows.push(ProviderRow {
+                id,
+                name: p.name(),
+                website: p.website(),
+                in_fallback_order: order.iter().position(|o| o == id).map(|n| n + 1),
+                capabilities: p.caps(),
+                status,
+            });
         }
         if self.global.json {
             self.json_out(&rows);
             return Ok(());
         }
         for r in &rows {
-            let caps = &r["capabilities"];
-            let order = match r["in_fallback_order"].as_u64() {
+            let caps = &r.capabilities;
+            let order = match r.in_fallback_order {
                 Some(n) => format!("#{n}"),
                 None => "--".into(),
             };
-            let mut flags = Vec::new();
-            if caps["private"] == false {
-                flags.push("PUBLIC");
-            }
-            if caps["custom_user"] == true {
-                flags.push("custom-user");
-            }
-            if caps["attachments"] == true {
-                flags.push("attachments");
-            }
-            if caps["delete_message"] == true {
-                flags.push("delete");
-            }
-            let status = match &r["status"] {
-                Value::Null => String::new(),
-                s if s["ok"] == true => format!("  ok {}ms", s["ms"]),
-                s => format!("  DOWN: {}", s["error"].as_str().unwrap_or_default()),
+            let flags: Vec<&str> = [
+                (!caps.private, "PUBLIC"),
+                (caps.custom_user, "custom-user"),
+                (caps.attachments, "attachments"),
+                (caps.delete_message, "delete"),
+            ]
+            .into_iter()
+            .filter_map(|(on, flag)| on.then_some(flag))
+            .collect();
+            let status = match &r.status {
+                None => String::new(),
+                Some(Health { ms: Some(ms), .. }) => format!("  ok {ms}ms"),
+                Some(h) => format!("  DOWN: {}", h.error.as_deref().unwrap_or_default()),
             };
             println!(
                 "{order:>3} {:<13} {:<15} {}{}",
-                r["id"].as_str().unwrap_or_default(),
-                r["name"].as_str().unwrap_or_default(),
-                self.dim(&format!(
-                    "{} | {}",
-                    flags.join(","),
-                    caps["lifetime"].as_str().unwrap_or_default()
-                )),
+                r.id,
+                r.name,
+                self.dim(&format!("{} | {}", flags.join(","), caps.lifetime)),
                 status
             );
         }
         Ok(())
+    }
+}
+
+fn check_health(id: &str) -> Health {
+    let start = Instant::now();
+    match provider::get(id).and_then(|p| p.health()) {
+        Ok(()) => Health {
+            ok: true,
+            ms: Some(start.elapsed().as_millis() as u64),
+            error: None,
+        },
+        Err(e) => Health {
+            ok: false,
+            ms: None,
+            error: Some(e.to_string()),
+        },
     }
 }
 
@@ -1177,6 +1159,13 @@ fn compile_plain(pattern: &str) -> Result<Regex> {
 
 fn message_body(m: &Message) -> String {
     body_text(m.text.as_deref(), m.html.as_deref(), 200)
+}
+
+fn message_links(m: &Message) -> Vec<String> {
+    extract::links(
+        m.text.as_deref().unwrap_or_default(),
+        m.html.as_deref().unwrap_or_default(),
+    )
 }
 
 fn summary_line(s: &Summary) -> String {

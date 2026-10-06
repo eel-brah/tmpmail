@@ -1,9 +1,11 @@
+use std::sync::OnceLock;
 use std::thread::sleep;
 use std::time::Duration;
 
 use reqwest::StatusCode;
 use reqwest::blocking::{Client, RequestBuilder, Response};
 use serde::de::DeserializeOwned;
+use serde_json::{Value, json};
 
 use crate::error::{Error, Result};
 use crate::render::clean_line;
@@ -11,32 +13,42 @@ use crate::render::clean_line;
 const USER_AGENT: &str = concat!("tmpmail/", env!("CARGO_PKG_VERSION"));
 const MAX_RETRIES: u32 = 3;
 
-/// Thin wrapper around a blocking client that turns every failure into a typed
-/// [`Error`] naming the provider, so a dead backend never surfaces as garbage.
-#[derive(Clone)]
-pub struct Http {
-    client: Client,
-    provider: &'static str,
-}
-
-impl Http {
-    pub fn new(provider: &'static str) -> Self {
+/// One client for the whole process, so polling reuses pooled connections
+/// instead of paying a TLS handshake per request.
+fn shared_client() -> &'static Client {
+    static CLIENT: OnceLock<Client> = OnceLock::new();
+    CLIENT.get_or_init(|| {
         let timeout = std::env::var("TMPMAIL_HTTP_TIMEOUT")
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(20);
-        let client = Client::builder()
+        Client::builder()
             .user_agent(USER_AGENT)
             .timeout(Duration::from_secs(timeout))
             .connect_timeout(Duration::from_secs(10))
             .https_only(!cfg!(test) && std::env::var_os("TMPMAIL_ALLOW_HTTP").is_none())
             .build()
-            .expect("HTTP client configuration is valid");
-        Http { client, provider }
+            .expect("HTTP client configuration is valid")
+    })
+}
+
+/// Thin wrapper around a blocking client that turns every failure into a typed
+/// [`Error`] naming the provider, so a dead backend never surfaces as garbage.
+pub struct Http {
+    client: &'static Client,
+    provider: &'static str,
+}
+
+impl Http {
+    pub fn new(provider: &'static str) -> Self {
+        Http {
+            client: shared_client(),
+            provider,
+        }
     }
 
     pub fn client(&self) -> &Client {
-        &self.client
+        self.client
     }
 
     /// Sends a request, retrying on 429 (honouring Retry-After) and mapping
@@ -79,7 +91,32 @@ impl Http {
             .map_err(|e| self.transport_error(e))
     }
 
-    pub fn parse<T: DeserializeOwned>(&self, body: &str) -> Result<T> {
+    /// POSTs a GraphQL query and returns its `data`, turning a non-empty
+    /// `errors` array into a typed error.
+    pub fn graphql(&self, url: &str, query: &str, variables: &Value) -> Result<Value> {
+        let body = json!({ "query": query, "variables": variables });
+        let mut v: Value = self.json(|| self.client.post(url).json(&body))?;
+        if let Some(errors) = v
+            .get("errors")
+            .and_then(Value::as_array)
+            .filter(|e| !e.is_empty())
+        {
+            let msg = errors
+                .iter()
+                .map(|e| e.get("message").and_then(Value::as_str).unwrap_or_default())
+                .collect::<Vec<_>>()
+                .join("; ");
+            if msg.contains("RATE_LIMIT") {
+                return Err(Error::RateLimited {
+                    provider: self.provider.to_string(),
+                });
+            }
+            return Err(self.bad(format!("GraphQL error: {msg}")));
+        }
+        Ok(v.get_mut("data").map(Value::take).unwrap_or_default())
+    }
+
+    fn parse<T: DeserializeOwned>(&self, body: &str) -> Result<T> {
         serde_json::from_str(body).map_err(|e| {
             let trimmed = body.trim_start();
             let detail = if trimmed.is_empty() {
@@ -97,6 +134,7 @@ impl Http {
         Error::BadResponse {
             provider: self.provider.to_string(),
             detail: detail.into(),
+            status: None,
         }
     }
 
@@ -116,13 +154,18 @@ impl Http {
 
     fn status_error(&self, status: StatusCode, body: &str) -> Error {
         let provider = self.provider.to_string();
-        let detail = format!("HTTP {}{}", status.as_u16(), describe_body(body));
-        match status.as_u16() {
+        let code = status.as_u16();
+        let detail = format!("HTTP {code}{}", describe_body(body));
+        match code {
             401 | 403 => Error::Auth { provider, detail },
             404 => Error::NotFound(format!("{provider}: not found ({detail})")),
             429 => Error::RateLimited { provider },
             500..=599 => Error::Unreachable { provider, detail },
-            _ => Error::BadResponse { provider, detail },
+            _ => Error::BadResponse {
+                provider,
+                detail,
+                status: Some(code),
+            },
         }
     }
 }

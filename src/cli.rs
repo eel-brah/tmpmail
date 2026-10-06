@@ -382,33 +382,14 @@ pub struct ProvidersArgs {
     pub check: bool,
 }
 
-const SUBCOMMANDS: &[&str] = &[
-    "new",
-    "generate",
-    "ls",
-    "inbox",
-    "read",
-    "show",
-    "wait",
-    "otp",
-    "links",
-    "watch",
-    "attachments",
-    "save",
-    "delete",
-    "whoami",
-    "copy",
-    "qr",
-    "domains",
-    "inboxes",
-    "use",
-    "login",
-    "drop",
-    "rotate",
-    "providers",
-    "completions",
-    "help",
-];
+/// Whether `name` is a subcommand or one of its aliases.
+fn is_subcommand(name: &str) -> bool {
+    use clap::CommandFactory;
+    name == "help"
+        || Cli::command()
+            .get_subcommands()
+            .any(|c| c.get_name() == name || c.get_all_aliases().any(|a| a == name))
+}
 
 /// Global options that take a value, so their value is not mistaken for a
 /// command when scanning legacy arguments.
@@ -457,7 +438,7 @@ pub fn rewrite_legacy(args: Vec<String>) -> Vec<String> {
                 continue;
             }
             _ if a.starts_with('-') => vec![arg],
-            _ if SUBCOMMANDS.contains(&a) => vec![arg],
+            _ if is_subcommand(a) => vec![arg],
             _ => vec!["read".into(), arg],
         });
     }

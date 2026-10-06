@@ -5,8 +5,11 @@
 use chrono::{Duration, Utc};
 use serde_json::{Value, json};
 
-use super::{Capabilities, CreateOpts, Inbox, Message, Provider, Summary, parse_date, str_field};
-use crate::error::{Error, Result};
+use super::{
+    Capabilities, CreateOpts, Inbox, Message, Provider, Summary, base_url, domain_unavailable,
+    parse_date, str_field,
+};
+use crate::error::{Result, message_not_found};
 use crate::http::Http;
 
 const BASE: &str = "https://api.guerrillamail.com/ajax.php";
@@ -35,7 +38,7 @@ pub struct Guerrilla {
 impl Guerrilla {
     pub fn new() -> Self {
         Guerrilla {
-            base: std::env::var("TMPMAIL_GUERRILLA_URL").unwrap_or_else(|_| BASE.to_string()),
+            base: base_url("guerrilla", BASE),
             http: Http::new("guerrilla"),
         }
     }
@@ -88,10 +91,8 @@ impl Guerrilla {
             subject: decode_entities(str_field(v, "mail_subject")),
             intro: decode_entities(str_field(v, "mail_excerpt")),
             date: parse_date(&v["mail_timestamp"]),
-            seen: v["mail_read"].as_i64().unwrap_or(0) != 0
-                || v["mail_read"].as_str().is_some_and(|s| s != "0"),
-            has_attachments: v["att"].as_i64().unwrap_or(0) > 0
-                || v["att"].as_str().is_some_and(|s| s != "0"),
+            seen: truthy(&v["mail_read"]),
+            has_attachments: truthy(&v["att"]),
         }
     }
 }
@@ -102,6 +103,11 @@ fn id_of(v: &Value) -> String {
         Value::String(s) => s.clone(),
         _ => String::new(),
     }
+}
+
+/// Flags arrive as numbers or numeric strings.
+fn truthy(v: &Value) -> bool {
+    v.as_i64().unwrap_or(0) != 0 || v.as_str().is_some_and(|s| s != "0")
 }
 
 /// Guerrilla HTML-escapes subjects and excerpts.
@@ -151,10 +157,7 @@ impl Provider for Guerrilla {
     fn create(&self, opts: &CreateOpts) -> Result<Inbox> {
         if let Some(d) = &opts.domain {
             if !DOMAINS.contains(&d.as_str()) {
-                return Err(Error::Usage(format!(
-                    "guerrilla: domain {d:?} not available, choose one of: {}",
-                    DOMAINS.join(", ")
-                )));
+                return Err(domain_unavailable(self.id(), d, &self.domains()?));
             }
         }
         let mut v = self.call("get_email_address", &[("lang", "en")])?;
@@ -170,14 +173,15 @@ impl Provider for Guerrilla {
             return Err(self.http.bad("no email_addr in response"));
         };
         let domain = opts.domain.as_deref().unwrap_or(default_domain);
+        let sid = match str_field(&v, "sid_token") {
+            "" => sid,
+            newer => newer.to_string(),
+        };
         let mut inbox = Inbox::new(
-            "guerrilla",
+            self.id(),
             format!("{local}@{domain}"),
-            json!({ "sid_token": str_field(&v, "sid_token").to_string() }),
+            json!({ "sid_token": sid }),
         );
-        if inbox.cred_str("sid_token") == Some("") {
-            inbox.set_cred("sid_token", sid);
-        }
         inbox.expires_at = Some(Utc::now() + Duration::minutes(60));
         Ok(inbox)
     }
@@ -195,7 +199,7 @@ impl Provider for Guerrilla {
     fn get(&self, inbox: &mut Inbox, id: &str) -> Result<Message> {
         let v = self.session_call(inbox, "fetch_email", &[("email_id", id)])?;
         if v.is_null() || v == json!(false) || v.get("mail_id").is_none() {
-            return Err(Error::NotFound(format!("message {id} not found")));
+            return Err(message_not_found(id));
         }
         let s = Self::summary(&v);
         let body = str_field(&v, "mail_body").to_string();

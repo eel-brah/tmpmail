@@ -6,10 +6,10 @@ use chrono::{Duration, Utc};
 use serde_json::{Value, json};
 
 use super::{
-    Capabilities, CreateOpts, Inbox, Message, Provider, Summary, parse_date, str_field,
-    synthetic_id,
+    Capabilities, CreateOpts, Inbox, Message, Provider, Summary, base_url, opt_str, parse_date,
+    str_field, synthetic_id,
 };
-use crate::error::{Error, Result, unsupported};
+use crate::error::{Error, Result, message_not_found, unsupported};
 use crate::http::Http;
 
 const BASE: &str = "https://api.tempmail.lol/v2";
@@ -22,7 +22,7 @@ pub struct TempmailLol {
 impl TempmailLol {
     pub fn new() -> Self {
         TempmailLol {
-            base: std::env::var("TMPMAIL_TEMPMAIL_LOL_URL").unwrap_or_else(|_| BASE.to_string()),
+            base: base_url("tempmail_lol", BASE),
             http: Http::new("tempmail_lol"),
         }
     }
@@ -64,14 +64,8 @@ fn to_message(e: &Value, address: &str) -> Message {
         }],
         subject: subject.to_string(),
         date,
-        text: e["body"]
-            .as_str()
-            .filter(|s| !s.is_empty())
-            .map(str::to_string),
-        html: e["html"]
-            .as_str()
-            .filter(|s| !s.is_empty())
-            .map(str::to_string),
+        text: opt_str(e, "body"),
+        html: opt_str(e, "html"),
         attachments: Vec::new(),
     }
 }
@@ -102,7 +96,7 @@ impl Provider for TempmailLol {
     }
 
     fn domains(&self) -> Result<Vec<String>> {
-        Err(unsupported("tempmail_lol", "listing domains (they rotate)"))
+        Err(unsupported(self.id(), "listing domains (they rotate)"))
     }
 
     fn health(&self) -> Result<()> {
@@ -120,10 +114,10 @@ impl Provider for TempmailLol {
 
     fn create(&self, opts: &CreateOpts) -> Result<Inbox> {
         if opts.user.is_some() {
-            return Err(unsupported("tempmail_lol", "choosing the username"));
+            return Err(unsupported(self.id(), "choosing the username"));
         }
         if opts.domain.is_some() {
-            return Err(unsupported("tempmail_lol", "choosing the domain"));
+            return Err(unsupported(self.id(), "choosing the domain"));
         }
         let v: Value = self.http.json(|| {
             self.http
@@ -135,39 +129,20 @@ impl Provider for TempmailLol {
         if address.is_empty() || token.is_empty() {
             return Err(self.http.bad("address or token missing"));
         }
-        let mut inbox = Inbox::new(
-            "tempmail_lol",
-            address.to_string(),
-            json!({ "token": token }),
-        );
+        let mut inbox = Inbox::new(self.id(), address.to_string(), json!({ "token": token }));
         inbox.expires_at = Some(Utc::now() + Duration::hours(1));
         Ok(inbox)
     }
 
     fn list(&self, inbox: &mut Inbox) -> Result<Vec<Summary>> {
-        Ok(self
-            .emails(inbox)?
-            .iter()
-            .map(|m| {
-                let mut s = m.summary();
-                s.seen = false;
-                s.intro = m
-                    .text
-                    .as_deref()
-                    .unwrap_or_default()
-                    .chars()
-                    .take(100)
-                    .collect();
-                s
-            })
-            .collect())
+        Ok(self.emails(inbox)?.iter().map(Message::summary).collect())
     }
 
     fn get(&self, inbox: &mut Inbox, id: &str) -> Result<Message> {
         self.emails(inbox)?
             .into_iter()
             .find(|m| m.id == id)
-            .ok_or_else(|| Error::NotFound(format!("message {id} not found")))
+            .ok_or_else(|| message_not_found(id))
     }
 }
 

@@ -13,8 +13,13 @@ pub enum Error {
     #[error("{provider}: authentication failed ({detail})")]
     Auth { provider: String, detail: String },
 
+    /// `status` is the HTTP status when the failure came from one.
     #[error("{provider}: unexpected response ({detail})")]
-    BadResponse { provider: String, detail: String },
+    BadResponse {
+        provider: String,
+        detail: String,
+        status: Option<u16>,
+    },
 
     #[error("{0}")]
     NotFound(String),
@@ -24,6 +29,13 @@ pub enum Error {
 
     #[error("{0}")]
     AddressTaken(String),
+
+    #[error("{provider}: domain {domain:?} not available, choose one of: {}", available.join(", "))]
+    DomainUnavailable {
+        provider: String,
+        domain: String,
+        available: Vec<String>,
+    },
 
     #[error("inbox {0} has expired")]
     Expired(String),
@@ -50,7 +62,10 @@ impl Error {
             | Error::BadResponse { .. }
             | Error::Auth { .. } => 3,
             Error::NotFound(_) | Error::NoInbox | Error::Expired(_) => 4,
-            Error::Usage(_) | Error::Unsupported { .. } | Error::AddressTaken(_) => 64,
+            Error::Usage(_)
+            | Error::Unsupported { .. }
+            | Error::AddressTaken(_)
+            | Error::DomainUnavailable { .. } => 64,
             Error::Other(_) => 1,
         }
     }
@@ -79,7 +94,7 @@ impl Error {
             Error::Expired(_) => "expired",
             Error::NoInbox => "no_inbox",
             Error::Timeout(_) => "timeout",
-            Error::Usage(_) => "usage",
+            Error::Usage(_) | Error::DomainUnavailable { .. } => "usage",
             Error::Other(_) => "error",
         }
     }
@@ -92,4 +107,8 @@ pub fn unsupported(provider: &str, what: &str) -> Error {
         provider: provider.to_string(),
         what: what.to_string(),
     }
+}
+
+pub fn message_not_found(id: &str) -> Error {
+    Error::NotFound(format!("message {id} not found"))
 }

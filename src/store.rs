@@ -122,10 +122,27 @@ impl State {
 
     pub fn remove(&mut self, n: usize) -> Inbox {
         let inbox = self.inboxes.remove(n);
-        if self.active.as_deref() == Some(inbox.address.as_str()) {
+        self.fix_active();
+        inbox
+    }
+
+    /// Forgets expired inboxes and returns how many were dropped.
+    pub fn prune_expired(&mut self) -> usize {
+        let before = self.inboxes.len();
+        self.inboxes.retain(|i| !i.is_expired());
+        self.fix_active();
+        before - self.inboxes.len()
+    }
+
+    /// If the active inbox is gone, the most recent one becomes active.
+    fn fix_active(&mut self) {
+        let gone = self
+            .active
+            .as_ref()
+            .is_some_and(|act| !self.inboxes.iter().any(|i| &i.address == act));
+        if gone {
             self.active = self.inboxes.last().map(|i| i.address.clone());
         }
-        inbox
     }
 }
 

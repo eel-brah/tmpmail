@@ -77,7 +77,7 @@ with the receiving address.
 | Command | Output |
 |---|---|
 | `otp` | `{"code", "candidates": [{"code", "score"}], "inbox", "message_id", "from", "subject"}` |
-| `wait --otp` | `{"code", "inbox", "message_id", "from", "subject"}` |
+| `wait --otp` | `{"code", "candidates": [{"code", "score"}], "inbox", "message_id", "from", "subject"}` |
 | `wait --link` | `{"link", "inbox", "message_id"}` |
 | `links` | `{"links": [...], "message_id"}` |
 | `attachments` | `{"message_id", "attachments": [...]}` |

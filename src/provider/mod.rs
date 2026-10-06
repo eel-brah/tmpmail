@@ -14,30 +14,33 @@ use crate::error::{Error, Result, unsupported};
 /// (maildrop) are left out on purpose: anyone who guesses the name reads the mail.
 pub const DEFAULT_ORDER: &[&str] = &["mailtm", "dropmail", "guerrilla", "tempmail_lol", "mailgw"];
 
-pub const ALL: &[&str] = &[
-    "mailtm",
-    "mailgw",
-    "dropmail",
-    "guerrilla",
-    "tempmail_lol",
-    "maildrop",
+type Constructor = fn() -> Box<dyn Provider>;
+
+/// Every provider, in the order `tmpmail providers` lists them.
+const REGISTRY: &[(&str, Constructor)] = &[
+    ("mailtm", || Box::new(mailtm::MailTm::tm())),
+    ("mailgw", || Box::new(mailtm::MailTm::gw())),
+    ("dropmail", || Box::new(dropmail::DropMail::new())),
+    ("guerrilla", || Box::new(guerrilla::Guerrilla::new())),
+    (
+        "tempmail_lol",
+        || Box::new(tempmail_lol::TempmailLol::new()),
+    ),
+    ("maildrop", || Box::new(maildrop::Maildrop::new())),
 ];
 
+pub fn all() -> impl Iterator<Item = &'static str> {
+    REGISTRY.iter().map(|(id, _)| *id)
+}
+
 pub fn get(id: &str) -> Result<Box<dyn Provider>> {
-    Ok(match id {
-        "mailtm" => Box::new(mailtm::MailTm::tm()),
-        "mailgw" => Box::new(mailtm::MailTm::gw()),
-        "dropmail" => Box::new(dropmail::DropMail::new()),
-        "guerrilla" => Box::new(guerrilla::Guerrilla::new()),
-        "tempmail_lol" => Box::new(tempmail_lol::TempmailLol::new()),
-        "maildrop" => Box::new(maildrop::Maildrop::new()),
-        other => {
-            return Err(Error::Usage(format!(
-                "unknown provider {other:?}, expected one of: {}",
-                ALL.join(", ")
-            )));
-        }
-    })
+    match REGISTRY.iter().find(|(known, _)| *known == id) {
+        Some((_, make)) => Ok(make()),
+        None => Err(Error::Usage(format!(
+            "unknown provider {id:?}, expected one of: {}",
+            all().collect::<Vec<_>>().join(", ")
+        ))),
+    }
 }
 
 /// A stored inbox. `credential` is provider-specific (JWT, session token, ...)
@@ -83,8 +86,12 @@ impl Inbox {
     }
 
     pub fn local_part(&self) -> &str {
-        self.address.split('@').next().unwrap_or(&self.address)
+        local_part(&self.address)
     }
+}
+
+pub fn local_part(address: &str) -> &str {
+    address.split('@').next().unwrap_or(address)
 }
 
 #[derive(Debug, Clone, Serialize, Default, PartialEq)]
@@ -111,14 +118,21 @@ pub struct Message {
 }
 
 impl Message {
+    /// Listing entry for providers that only return full messages.
     pub fn summary(&self) -> Summary {
         Summary {
             id: self.id.clone(),
             from: self.from.clone(),
             subject: self.subject.clone(),
-            intro: String::new(),
+            intro: self
+                .text
+                .as_deref()
+                .unwrap_or_default()
+                .chars()
+                .take(100)
+                .collect(),
             date: self.date,
-            seen: true,
+            seen: false,
             has_attachments: !self.attachments.is_empty(),
         }
     }
@@ -196,6 +210,45 @@ pub trait Provider {
     fn login(&self, _address: &str, _password: &str) -> Result<Inbox> {
         Err(unsupported(self.id(), "logging in to an existing address"))
     }
+
+    /// Whether `login` can tell from the address alone that it belongs here.
+    fn owns_address(&self, _address: &str) -> bool {
+        false
+    }
+}
+
+/// `TMPMAIL_<ID>_URL`, else the provider's real endpoint.
+pub fn base_url(id: &str, default: &str) -> String {
+    let env = format!("TMPMAIL_{}_URL", id.to_uppercase());
+    std::env::var(env)
+        .unwrap_or_else(|_| default.to_string())
+        .trim_end_matches('/')
+        .to_string()
+}
+
+pub fn domain_unavailable(provider: &str, domain: &str, available: &[String]) -> Error {
+    Error::DomainUnavailable {
+        provider: provider.to_string(),
+        domain: domain.to_string(),
+        available: available.to_vec(),
+    }
+}
+
+/// Calls with the inbox's stored token; if the provider rejects it, gets a
+/// fresh one from `refresh` (which stores it in the inbox) and tries once more.
+pub fn with_token<T>(
+    inbox: &mut Inbox,
+    refresh: impl FnOnce(&mut Inbox) -> Result<String>,
+    call: impl Fn(&str) -> Result<T>,
+) -> Result<T> {
+    if let Some(token) = inbox.cred_str("token") {
+        match call(token) {
+            Err(Error::Auth { .. }) => {}
+            other => return other,
+        }
+    }
+    let token = refresh(inbox)?;
+    call(&token)
 }
 
 /// Parses timestamps as providers send them: RFC 3339 strings or unix seconds.
@@ -222,6 +275,13 @@ fn from_unix(n: i64) -> Option<DateTime<Utc>> {
 
 pub fn str_field<'a>(v: &'a Value, key: &str) -> &'a str {
     v.get(key).and_then(Value::as_str).unwrap_or_default()
+}
+
+/// A string field, with empty treated as absent.
+pub fn opt_str(v: &Value, key: &str) -> Option<String> {
+    Some(str_field(v, key))
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
 }
 
 /// Stable short id for providers whose messages have none (FNV-1a).
@@ -301,8 +361,8 @@ mod tests {
 
     #[test]
     fn every_listed_provider_resolves() {
-        for id in ALL {
-            assert_eq!(get(id).unwrap().id(), *id);
+        for id in all() {
+            assert_eq!(get(id).unwrap().id(), id);
         }
         assert!(get("1secmail").is_err());
     }

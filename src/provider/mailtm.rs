@@ -5,8 +5,8 @@
 use serde_json::{Value, json};
 
 use super::{
-    Attachment, Capabilities, CreateOpts, Inbox, Message, Provider, Summary, parse_date,
-    random_password, random_user, str_field,
+    Attachment, Capabilities, CreateOpts, Inbox, Message, Provider, Summary, base_url,
+    domain_unavailable, opt_str, parse_date, random_password, random_user, str_field, with_token,
 };
 use crate::error::{Error, Result};
 use crate::http::Http;
@@ -42,13 +42,11 @@ impl MailTm {
     }
 
     fn with_base(id: &'static str, name: &'static str, website: &'static str, base: &str) -> Self {
-        let env = format!("TMPMAIL_{}_URL", id.to_uppercase());
-        let base = std::env::var(env).unwrap_or_else(|_| base.to_string());
         MailTm {
             id,
             name,
             website,
-            base: base.trim_end_matches('/').to_string(),
+            base: base_url(id, base),
             http: Http::new(id),
         }
     }
@@ -73,25 +71,43 @@ impl MailTm {
 
     /// Runs an authenticated request, refreshing the JWT once if it expired.
     fn authed<T>(&self, inbox: &mut Inbox, call: impl Fn(&str) -> Result<T>) -> Result<T> {
-        if let Some(token) = inbox.cred_str("token") {
-            match call(token) {
-                Err(Error::Auth { .. }) => {}
-                other => return other,
+        let refresh = |inbox: &mut Inbox| {
+            let password = inbox
+                .cred_str("password")
+                .ok_or_else(|| {
+                    self.http
+                        .bad("stored inbox has no password, cannot refresh token")
+                })?
+                .to_string();
+            let (token, account_id) = self.token(&inbox.address, &password)?;
+            inbox.set_cred("token", token.clone());
+            if !account_id.is_empty() {
+                inbox.set_cred("account_id", account_id);
             }
-        }
-        let password = inbox
-            .cred_str("password")
-            .ok_or_else(|| {
+            Ok(token)
+        };
+        with_token(inbox, refresh, call)
+    }
+
+    fn get_json(&self, inbox: &mut Inbox, path: &str, query: &[(&str, usize)]) -> Result<Value> {
+        self.authed(inbox, |token| {
+            self.http.json(|| {
                 self.http
-                    .bad("stored inbox has no password, cannot refresh token")
-            })?
-            .to_string();
-        let (token, account_id) = self.token(&inbox.address, &password)?;
-        inbox.set_cred("token", token.clone());
-        if !account_id.is_empty() {
-            inbox.set_cred("account_id", account_id);
-        }
-        call(&token)
+                    .client()
+                    .get(self.url(path))
+                    .query(query)
+                    .header("Accept", "application/json")
+                    .bearer_auth(token)
+            })
+        })
+    }
+
+    fn delete(&self, inbox: &mut Inbox, path: &str) -> Result<()> {
+        self.authed(inbox, |token| {
+            self.http
+                .send(|| self.http.client().delete(self.url(path)).bearer_auth(token))
+                .map(|_| ())
+        })
     }
 
     fn summary(v: &Value) -> Summary {
@@ -175,13 +191,7 @@ impl Provider for MailTm {
         let domains = self.domains()?;
         let domain = match &opts.domain {
             Some(d) if domains.contains(d) => d.clone(),
-            Some(d) => {
-                return Err(Error::Usage(format!(
-                    "{}: domain {d:?} not available, choose one of: {}",
-                    self.id,
-                    domains.join(", ")
-                )));
-            }
+            Some(d) => return Err(domain_unavailable(self.id, d, &domains)),
             None => domains[rand::random_range(0..domains.len())].clone(),
         };
         let password = opts.password.clone().unwrap_or_else(random_password);
@@ -201,7 +211,11 @@ impl Provider for MailTm {
             match created {
                 Ok(_) => break,
                 // 422 = address already used or rejected.
-                Err(Error::BadResponse { detail, .. }) if detail.starts_with("HTTP 422") => {
+                Err(Error::BadResponse {
+                    detail,
+                    status: Some(422),
+                    ..
+                }) => {
                     if attempt == attempts {
                         return Err(Error::AddressTaken(format!(
                             "{}: {address} is taken or invalid ({detail})",
@@ -213,12 +227,7 @@ impl Provider for MailTm {
             }
         }
 
-        let (token, account_id) = self.token(&address, &password)?;
-        Ok(Inbox::new(
-            self.id,
-            address,
-            json!({ "password": password, "token": token, "account_id": account_id }),
-        ))
+        self.login(&address, &password)
     }
 
     fn login(&self, address: &str, password: &str) -> Result<Inbox> {
@@ -233,17 +242,7 @@ impl Provider for MailTm {
     fn list(&self, inbox: &mut Inbox) -> Result<Vec<Summary>> {
         let mut all = Vec::new();
         for page in 1..=MAX_PAGES {
-            let batch: Value = self.authed(inbox, |token| {
-                self.http.json(|| {
-                    self.http
-                        .client()
-                        .get(self.url("/messages"))
-                        .query(&[("page", page)])
-                        .header("Accept", "application/json")
-                        .bearer_auth(token)
-                })
-            })?;
-            let batch = members(batch);
+            let batch = members(self.get_json(inbox, "/messages", &[("page", page)])?);
             let n = batch.len();
             all.extend(batch.iter().map(Self::summary));
             if n < PAGE_SIZE {
@@ -254,16 +253,7 @@ impl Provider for MailTm {
     }
 
     fn get(&self, inbox: &mut Inbox, id: &str) -> Result<Message> {
-        let path = format!("/messages/{id}");
-        let v: Value = self.authed(inbox, |token| {
-            self.http.json(|| {
-                self.http
-                    .client()
-                    .get(self.url(&path))
-                    .header("Accept", "application/json")
-                    .bearer_auth(token)
-            })
-        })?;
+        let v = self.get_json(inbox, &format!("/messages/{id}"), &[])?;
         let html = match &v["html"] {
             Value::Array(parts) => {
                 let joined: String = parts.iter().filter_map(Value::as_str).collect();
@@ -299,26 +289,14 @@ impl Provider for MailTm {
                 .unwrap_or_default(),
             subject: str_field(&v, "subject").to_string(),
             date: parse_date(&v["createdAt"]),
-            text: v["text"]
-                .as_str()
-                .filter(|s| !s.is_empty())
-                .map(str::to_string),
+            text: opt_str(&v, "text"),
             html,
             attachments,
         })
     }
 
     fn raw(&self, inbox: &mut Inbox, id: &str) -> Result<Vec<u8>> {
-        let path = format!("/sources/{id}");
-        let v: Value = self.authed(inbox, |token| {
-            self.http.json(|| {
-                self.http
-                    .client()
-                    .get(self.url(&path))
-                    .header("Accept", "application/json")
-                    .bearer_auth(token)
-            })
-        })?;
+        let v = self.get_json(inbox, &format!("/sources/{id}"), &[])?;
         match v["data"].as_str() {
             Some(data) => Ok(data.as_bytes().to_vec()),
             None => Err(self.http.bad("message source missing `data`")),
@@ -337,17 +315,7 @@ impl Provider for MailTm {
     }
 
     fn delete_message(&self, inbox: &mut Inbox, id: &str) -> Result<()> {
-        let path = format!("/messages/{id}");
-        self.authed(inbox, |token| {
-            self.http
-                .send(|| {
-                    self.http
-                        .client()
-                        .delete(self.url(&path))
-                        .bearer_auth(token)
-                })
-                .map(|_| ())
-        })
+        self.delete(inbox, &format!("/messages/{id}"))
     }
 
     fn delete_inbox(&self, inbox: &mut Inbox) -> Result<()> {
@@ -359,17 +327,7 @@ impl Provider for MailTm {
         if account.is_empty() {
             return Err(self.http.bad("account id unknown"));
         }
-        let path = format!("/accounts/{account}");
-        self.authed(inbox, |token| {
-            self.http
-                .send(|| {
-                    self.http
-                        .client()
-                        .delete(self.url(&path))
-                        .bearer_auth(token)
-                })
-                .map(|_| ())
-        })
+        self.delete(inbox, &format!("/accounts/{account}"))
     }
 }
 

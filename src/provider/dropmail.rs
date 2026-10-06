@@ -6,11 +6,12 @@ use chrono::{Duration, Utc};
 use serde_json::{Value, json};
 
 use super::{
-    Attachment, Capabilities, CreateOpts, Inbox, Message, Provider, Summary, parse_date, str_field,
+    Attachment, Capabilities, CreateOpts, Inbox, Message, Provider, Summary, base_url,
+    domain_unavailable, opt_str, parse_date, str_field, with_token,
 };
 use std::path::PathBuf;
 
-use crate::error::{Error, Result};
+use crate::error::{Error, Result, message_not_found, unsupported};
 use crate::http::Http;
 use crate::store::{Store, create_private_dir, write_private};
 
@@ -34,7 +35,7 @@ pub struct DropMail {
 impl DropMail {
     pub fn new() -> Self {
         DropMail {
-            base: std::env::var("TMPMAIL_DROPMAIL_URL").unwrap_or_else(|_| BASE.to_string()),
+            base: base_url("dropmail", BASE),
             http: Http::new("dropmail"),
             cache: Some(Store::default_dir().join("dropmail-token.json")),
         }
@@ -78,7 +79,9 @@ impl DropMail {
                 .post(format!("{}/api/token/generate", self.base))
                 .json(&json!({ "type": "af", "lifetime": TOKEN_LIFETIME }))
         }) {
-            Err(Error::BadResponse { detail, .. }) if detail.starts_with("HTTP 402") => {
+            Err(Error::BadResponse {
+                status: Some(402), ..
+            }) => {
                 return Err(self.http.bad(
                     "DropMail wants a captcha before issuing more API tokens to this IP; \
                      try later or set TMPMAIL_DROPMAIL_TOKEN (see https://dropmail.me/api/)",
@@ -92,61 +95,45 @@ impl DropMail {
         }
     }
 
-    fn gql(&self, token: &str, query: &str, variables: Value) -> Result<Value> {
+    fn gql(&self, token: &str, query: &str, variables: &Value) -> Result<Value> {
         let url = format!("{}/api/graphql/{token}", self.base);
-        let body = json!({ "query": query, "variables": variables });
-        let v: Value = self
-            .http
-            .json(|| self.http.client().post(&url).json(&body))?;
-        if let Some(errors) = v
-            .get("errors")
-            .and_then(Value::as_array)
-            .filter(|e| !e.is_empty())
-        {
-            let msg = errors
-                .iter()
-                .map(|e| str_field(e, "message"))
-                .collect::<Vec<_>>()
-                .join("; ");
-            if msg.contains("RATE_LIMIT") {
-                return Err(Error::RateLimited {
-                    provider: "dropmail".into(),
-                });
-            }
-            return Err(self.http.bad(format!("GraphQL error: {msg}")));
-        }
-        Ok(v["data"].clone())
+        self.http.graphql(&url, query, variables)
     }
 
     /// Ensures a valid token, regenerating it if the API rejects the stored one.
     fn gql_inbox(&self, inbox: &mut Inbox, query: &str, variables: Value) -> Result<Value> {
-        if let Some(token) = inbox.cred_str("token").map(str::to_string) {
-            match self.gql(&token, query, variables.clone()) {
-                Err(Error::Auth { .. }) => {}
-                other => return other,
-            }
-        }
-        let token = self.token(true)?;
-        inbox.set_cred("token", token.clone());
-        self.gql(&token, query, variables)
+        let refresh = |inbox: &mut Inbox| {
+            let token = self.token(true)?;
+            inbox.set_cred("token", token.clone());
+            Ok(token)
+        };
+        with_token(inbox, refresh, |token| self.gql(token, query, &variables))
     }
 
     /// Returns the session's mails, restoring the address into a fresh session
     /// when the old one expired.
     fn mails(&self, inbox: &mut Inbox) -> Result<Vec<Value>> {
         let session = inbox.cred_str("session_id").unwrap_or_default().to_string();
-        let data = self.gql_inbox(inbox, MAILS_QUERY, json!({ "id": session }))?;
-        if data["session"].is_object() {
-            if let Some(exp) = parse_date(&data["session"]["expiresAt"]) {
+        let mut data = self.gql_inbox(inbox, MAILS_QUERY, json!({ "id": session }))?;
+        let session = &mut data["session"];
+        if session.is_object() {
+            if let Some(exp) = parse_date(&session["expiresAt"]) {
                 inbox.expires_at = Some(exp);
             }
-            return Ok(data["session"]["mails"]
-                .as_array()
-                .cloned()
-                .unwrap_or_default());
+            return Ok(match session["mails"].take() {
+                Value::Array(mails) => mails,
+                _ => Vec::new(),
+            });
         }
         self.restore(inbox)?;
         Ok(Vec::new())
+    }
+
+    fn find_mail(&self, inbox: &mut Inbox, id: &str) -> Result<Value> {
+        self.mails(inbox)?
+            .into_iter()
+            .find(|m| str_field(m, "id") == id)
+            .ok_or_else(|| message_not_found(id))
     }
 
     fn restore(&self, inbox: &mut Inbox) -> Result<()> {
@@ -186,14 +173,8 @@ impl DropMail {
             to: vec![str_field(v, "toAddr").to_string()],
             subject: str_field(v, "headerSubject").to_string(),
             date: parse_date(&v["receivedAt"]),
-            text: v["text"]
-                .as_str()
-                .filter(|s| !s.is_empty())
-                .map(str::to_string),
-            html: v["html"]
-                .as_str()
-                .filter(|s| !s.is_empty())
-                .map(str::to_string),
+            text: opt_str(v, "text"),
+            html: opt_str(v, "html"),
             attachments: v["attachments"]
                 .as_array()
                 .map(|a| {
@@ -203,8 +184,7 @@ impl DropMail {
                             filename: str_field(att, "name").to_string(),
                             content_type: str_field(att, "mime").to_string(),
                             size: att["rawSize"].as_u64(),
-                            url: Some(str_field(att, "downloadUrl").to_string())
-                                .filter(|u| !u.is_empty()),
+                            url: opt_str(att, "downloadUrl"),
                         })
                         .collect()
                 })
@@ -248,27 +228,24 @@ impl Provider for DropMail {
 
     fn create(&self, opts: &CreateOpts) -> Result<Inbox> {
         if opts.user.is_some() {
-            return Err(crate::error::unsupported(
-                "dropmail",
-                "choosing the username",
-            ));
+            return Err(unsupported(self.id(), "choosing the username"));
         }
         let domain_id = match &opts.domain {
             None => None,
-            Some(d) => Some(
-                self.domain_ids()?
-                    .into_iter()
-                    .find(|(_, name)| name == d)
-                    .map(|(id, _)| id)
-                    .ok_or_else(|| Error::Usage(format!("dropmail: domain {d:?} not available")))?,
-            ),
+            Some(d) => {
+                let (ids, names): (Vec<_>, Vec<_>) = self.domain_ids()?.into_iter().unzip();
+                match names.iter().position(|name| name == d) {
+                    Some(k) => Some(ids[k].clone()),
+                    None => return Err(domain_unavailable(self.id(), d, &names)),
+                }
+            }
         };
         let token = self.token(false)?;
         let data = self.gql(
             &token,
             "mutation($d: ID) { introduceSession(input: {withAddress: true, domainId: $d}) { \
              id expiresAt addresses { address restoreKey } } }",
-            json!({ "d": domain_id }),
+            &json!({ "d": domain_id }),
         )?;
         let s = &data["introduceSession"];
         let addr = &s["addresses"][0];
@@ -277,7 +254,7 @@ impl Provider for DropMail {
             return Err(self.http.bad("no address in introduceSession response"));
         }
         let mut inbox = Inbox::new(
-            "dropmail",
+            self.id(),
             address.to_string(),
             json!({
                 "token": token,
@@ -293,36 +270,16 @@ impl Provider for DropMail {
         Ok(self
             .mails(inbox)?
             .iter()
-            .map(|m| {
-                let msg = Self::message(m);
-                let mut s = msg.summary();
-                s.seen = false;
-                s.intro = msg
-                    .text
-                    .as_deref()
-                    .unwrap_or_default()
-                    .chars()
-                    .take(100)
-                    .collect();
-                s
-            })
+            .map(|m| Self::message(m).summary())
             .collect())
     }
 
     fn get(&self, inbox: &mut Inbox, id: &str) -> Result<Message> {
-        self.mails(inbox)?
-            .iter()
-            .find(|m| str_field(m, "id") == id)
-            .map(Self::message)
-            .ok_or_else(|| Error::NotFound(format!("message {id} not found")))
+        Ok(Self::message(&self.find_mail(inbox, id)?))
     }
 
     fn raw(&self, inbox: &mut Inbox, id: &str) -> Result<Vec<u8>> {
-        let mail = self
-            .mails(inbox)?
-            .into_iter()
-            .find(|m| str_field(m, "id") == id)
-            .ok_or_else(|| Error::NotFound(format!("message {id} not found")))?;
+        let mail = self.find_mail(inbox, id)?;
         let url = str_field(&mail, "downloadUrl").to_string();
         self.http.bytes(|| self.http.client().get(&url))
     }
@@ -339,7 +296,7 @@ impl Provider for DropMail {
 impl DropMail {
     fn domain_ids(&self) -> Result<Vec<(String, String)>> {
         let token = self.token(false)?;
-        let data = self.gql(&token, "{ domains { id name availableVia } }", json!({}))?;
+        let data = self.gql(&token, "{ domains { id name availableVia } }", &json!({}))?;
         let list: Vec<(String, String)> = data["domains"]
             .as_array()
             .into_iter()
