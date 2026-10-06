@@ -102,7 +102,7 @@ pub fn open(target: &str, browser: Option<&str>) -> anyhow::Result<()> {
 pub fn notify(title: &str, body: &str) {
     let _ = if on_path("notify-send") {
         Command::new("notify-send")
-            .args(["--app-name=tmpmail", title, body])
+            .args(["--app-name=tmpmail", "--", title, body])
             .status()
     } else if on_path("osascript") {
         let esc = |s: &str| s.replace('\\', "\\\\").replace('"', "\\\"");

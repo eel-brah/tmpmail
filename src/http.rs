@@ -133,7 +133,8 @@ impl Http {
     pub fn bad(&self, detail: impl Into<String>) -> Error {
         Error::BadResponse {
             provider: self.provider.to_string(),
-            detail: detail.into(),
+            // Often quotes the provider's own words: keep escapes out.
+            detail: clean_line(&detail.into()),
             status: None,
         }
     }

@@ -78,6 +78,8 @@ with the receiving address.
 |---|---|
 | `otp` | `{"code", "candidates": [{"code", "score"}], "inbox", "message_id", "from", "subject"}` |
 | `wait --otp` | `{"code", "candidates": [{"code", "score"}], "inbox", "message_id", "from", "subject"}` |
+
+`candidates` lists the heuristic matches; it is empty when `--regex` / `--otp-regex` picked the code.
 | `wait --link` | `{"link", "inbox", "message_id"}` |
 | `links` | `{"links": [...], "message_id"}` |
 | `attachments` | `{"message_id", "attachments": [...]}` |

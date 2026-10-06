@@ -60,8 +60,45 @@ impl Store {
         }
     }
 
-    pub fn save(&self, state: &State) -> Result<()> {
+    /// Applies `f` to the state on disk and saves it, holding a lock so a
+    /// concurrent tmpmail (say a long `watch`) can't overwrite the change
+    /// with an older copy. Returns the new state and what `f` returned.
+    pub fn update<T>(&self, f: impl FnOnce(&mut State) -> T) -> Result<(State, T)> {
         create_private_dir(&self.dir)?;
+        let _lock = self.lock()?;
+        let mut state = self.load()?;
+        let out = f(&mut state);
+        self.save(&state)?;
+        Ok((state, out))
+    }
+
+    /// Exclusive lock held until the returned file is dropped.
+    fn lock(&self) -> Result<fs::File> {
+        let path = self.dir.join(".lock");
+        let mut opts = fs::OpenOptions::new();
+        opts.write(true).create(true).truncate(false);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o600);
+        }
+        let file = opts
+            .open(&path)
+            .with_context(|| format!("open {}", path.display()))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::io::AsRawFd;
+            // SAFETY: flock on a file descriptor we own; released on close.
+            if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
+                return Err(anyhow::Error::from(std::io::Error::last_os_error())
+                    .context(format!("lock {}", path.display()))
+                    .into());
+            }
+        }
+        Ok(file)
+    }
+
+    fn save(&self, state: &State) -> Result<()> {
         let tmp = self.dir.join(format!(".state.json.{}", std::process::id()));
         let data = serde_json::to_vec_pretty(state).context("serialize state")?;
         write_private(&tmp, &data)?;
@@ -71,6 +108,13 @@ impl Store {
 }
 
 impl State {
+    /// Index of the inbox with exactly this address (any case).
+    pub fn position(&self, address: &str) -> Option<usize> {
+        self.inboxes
+            .iter()
+            .position(|i| i.address.eq_ignore_ascii_case(address))
+    }
+
     pub fn find(&self, address: &str) -> Option<usize> {
         let address = address.to_lowercase();
         self.inboxes
@@ -186,10 +230,9 @@ mod tests {
     fn round_trip_with_private_permissions() {
         let tmp = tempfile::tempdir().unwrap();
         let store = Store::new(tmp.path().join("state"));
-        let mut state = store.load().unwrap();
-        assert!(state.inboxes.is_empty());
-        state.add(inbox("a@x.com"));
-        store.save(&state).unwrap();
+        assert!(store.load().unwrap().inboxes.is_empty());
+        let (state, ()) = store.update(|s| s.add(inbox("a@x.com"))).unwrap();
+        assert!(!state.inboxes.is_empty());
 
         let loaded = store.load().unwrap();
         assert_eq!(loaded.inboxes, state.inboxes);
@@ -222,6 +265,27 @@ mod tests {
         assert_eq!(s.resolve(None).unwrap(), 0);
         s.remove(0);
         assert_eq!(s.active.as_deref(), Some("two@y.com"));
+    }
+
+    #[test]
+    fn update_keeps_changes_made_by_another_process() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Store::new(tmp.path().to_path_buf());
+        store.update(|s| s.add(inbox("a@x.com"))).unwrap();
+        // A long-running process holds this snapshot...
+        let stale = store.load().unwrap();
+        // ...while another adds an inbox.
+        store.update(|s| s.add(inbox("b@x.com"))).unwrap();
+        // The first one updating its inbox must not drop b@x.com.
+        let mut changed = stale.inboxes[0].clone();
+        changed.label = Some("x".into());
+        let (state, ()) = store
+            .update(|s| {
+                let n = s.position(&changed.address).unwrap();
+                s.inboxes[n] = changed;
+            })
+            .unwrap();
+        assert_eq!(state.inboxes.len(), 2);
     }
 
     #[test]

@@ -9,6 +9,7 @@ use super::{
     Attachment, Capabilities, CreateOpts, Inbox, Message, Provider, Summary, base_url,
     domain_unavailable, opt_str, parse_date, str_field, with_token,
 };
+use std::cell::RefCell;
 use std::path::PathBuf;
 
 use crate::error::{Error, Result, message_not_found, unsupported};
@@ -30,6 +31,9 @@ pub struct DropMail {
     /// Where the shared API token is cached. Generating one per call gets the
     /// IP challenged with a captcha quickly.
     cache: Option<PathBuf>,
+    /// The last mailbox fetched, by address. `list` already downloads whole
+    /// messages, so `get` and `raw` can take them from here.
+    last_mails: RefCell<Option<(String, Vec<Value>)>>,
 }
 
 impl DropMail {
@@ -38,6 +42,7 @@ impl DropMail {
             base: base_url("dropmail", BASE),
             http: Http::new("dropmail"),
             cache: Some(Store::default_dir().join("dropmail-token.json")),
+            last_mails: RefCell::default(),
         }
     }
 
@@ -100,6 +105,20 @@ impl DropMail {
         self.http.graphql(&url, query, variables)
     }
 
+    /// For calls outside an inbox: the cached token, replaced once if the API
+    /// rejects it. Returns the token used along with the data.
+    fn gql_any(&self, query: &str, variables: &Value) -> Result<(String, Value)> {
+        let token = self.token(false)?;
+        match self.gql(&token, query, variables) {
+            Err(Error::Auth { .. }) => {
+                let token = self.token(true)?;
+                let data = self.gql(&token, query, variables)?;
+                Ok((token, data))
+            }
+            other => other.map(|data| (token, data)),
+        }
+    }
+
     /// Ensures a valid token, regenerating it if the API rejects the stored one.
     fn gql_inbox(&self, inbox: &mut Inbox, query: &str, variables: Value) -> Result<Value> {
         let refresh = |inbox: &mut Inbox| {
@@ -118,18 +137,35 @@ impl DropMail {
         let session = &mut data["session"];
         if session.is_object() {
             if let Some(exp) = parse_date(&session["expiresAt"]) {
-                inbox.expires_at = Some(exp);
+                // Each check extends the session; recording every extension
+                // would rewrite the state file on every poll.
+                if inbox
+                    .expires_at
+                    .is_none_or(|old| (exp - old).num_seconds().abs() >= 60)
+                {
+                    inbox.expires_at = Some(exp);
+                }
             }
-            return Ok(match session["mails"].take() {
+            let mails = match session["mails"].take() {
                 Value::Array(mails) => mails,
                 _ => Vec::new(),
-            });
+            };
+            *self.last_mails.borrow_mut() = Some((inbox.address.clone(), mails.clone()));
+            return Ok(mails);
         }
         self.restore(inbox)?;
         Ok(Vec::new())
     }
 
     fn find_mail(&self, inbox: &mut Inbox, id: &str) -> Result<Value> {
+        // Mails never change, so one seen in the last listing is current.
+        if let Some((address, mails)) = &*self.last_mails.borrow() {
+            if *address == inbox.address {
+                if let Some(m) = mails.iter().find(|m| str_field(m, "id") == id) {
+                    return Ok(m.clone());
+                }
+            }
+        }
         self.mails(inbox)?
             .into_iter()
             .find(|m| str_field(m, "id") == id)
@@ -240,9 +276,7 @@ impl Provider for DropMail {
                 }
             }
         };
-        let token = self.token(false)?;
-        let data = self.gql(
-            &token,
+        let (token, data) = self.gql_any(
             "mutation($d: ID) { introduceSession(input: {withAddress: true, domainId: $d}) { \
              id expiresAt addresses { address restoreKey } } }",
             &json!({ "d": domain_id }),
@@ -295,8 +329,7 @@ impl Provider for DropMail {
 
 impl DropMail {
     fn domain_ids(&self) -> Result<Vec<(String, String)>> {
-        let token = self.token(false)?;
-        let data = self.gql(&token, "{ domains { id name availableVia } }", &json!({}))?;
+        let (_, data) = self.gql_any("{ domains { id name availableVia } }", &json!({}))?;
         let list: Vec<(String, String)> = data["domains"]
             .as_array()
             .into_iter()
@@ -344,6 +377,7 @@ mod tests {
             base: s.url(),
             http: Http::new("dropmail"),
             cache: None,
+            last_mails: RefCell::default(),
         };
         let mut inbox = p.create(&CreateOpts::default()).unwrap();
         assert_eq!(inbox.address, "abc@10mail.org");
@@ -379,6 +413,7 @@ mod tests {
             base: s.url(),
             http: Http::new("dropmail"),
             cache: None,
+            last_mails: RefCell::default(),
         };
         assert!(matches!(
             p.domains().unwrap_err(),

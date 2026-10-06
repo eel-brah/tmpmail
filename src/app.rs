@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io::{IsTerminal, Write};
 use std::thread::sleep;
 use std::time::{Duration, Instant};
@@ -23,6 +23,8 @@ pub struct App {
     pub store: Store,
     pub state: State,
     color: bool,
+    /// Built once per run so providers can reuse what they fetched.
+    providers: HashMap<String, Box<dyn Provider>>,
 }
 
 /// What `--json` prints for an inbox. Credentials are never included.
@@ -73,6 +75,7 @@ impl App {
             store,
             state,
             color,
+            providers: HashMap::new(),
         })
     }
 
@@ -124,14 +127,15 @@ impl App {
         println!("{}", serde_json::to_string_pretty(v).expect("serializable"));
     }
 
+    /// Messages can quote provider responses, so they are cleaned like mail.
     fn note(&self, msg: &str) {
         if !self.global.quiet && !self.global.json {
-            eprintln!("{}", self.dim(msg));
+            eprintln!("{}", self.dim(&clean(msg)));
         }
     }
 
     fn warn(&self, msg: &str) {
-        eprintln!("tmpmail: {msg}");
+        eprintln!("tmpmail: {}", clean_line(msg));
     }
 
     fn view<'a>(&self, inbox: &'a Inbox) -> InboxView<'a> {
@@ -167,13 +171,26 @@ impl App {
         f: impl FnOnce(&dyn Provider, &mut Inbox) -> Result<T>,
     ) -> Result<T> {
         let mut inbox = self.state.inboxes[n].clone();
-        let p = provider::get(&inbox.provider)?;
-        let result = f(p.as_ref(), &mut inbox);
+        let p = self.provider(&inbox.provider)?;
+        let result = f(p, &mut inbox);
         if inbox != self.state.inboxes[n] {
-            self.state.inboxes[n] = inbox;
-            self.store.save(&self.state)?;
+            self.state.inboxes[n] = inbox.clone();
+            // Merge into the file as it is now: another tmpmail may have
+            // changed other inboxes. One dropped meanwhile stays dropped.
+            self.store.update(|s| {
+                if let Some(k) = s.position(&inbox.address) {
+                    s.inboxes[k] = inbox;
+                }
+            })?;
         }
         result
+    }
+
+    fn provider(&mut self, id: &str) -> Result<&dyn Provider> {
+        if !self.providers.contains_key(id) {
+            self.providers.insert(id.to_string(), provider::get(id)?);
+        }
+        Ok(self.providers[id].as_ref())
     }
 
     /// Inbox indexes a command should poll: all stored ones with
@@ -250,21 +267,17 @@ impl App {
         self.with_message(msg.id.as_deref(), |p, inbox, id| p.get(inbox, id))
     }
 
-    fn save_state(&self) -> Result<()> {
-        self.store.save(&self.state)
-    }
-
     /// Stores `inbox` as the active one and prints it.
     fn activate(&mut self, inbox: &Inbox, copy: bool) -> Result<()> {
-        self.state.add(inbox.clone());
-        self.save_state()?;
+        let added = inbox.clone();
+        self.state = self.store.update(|s| s.add(added))?.0;
         if copy {
             system::copy(&inbox.address, self.clipboard_cmd().as_deref())?;
         }
         if self.global.json {
             self.json_out(&self.view(inbox));
         } else {
-            println!("{}", inbox.address);
+            println!("{}", clean_line(&inbox.address));
         }
         Ok(())
     }
@@ -285,7 +298,7 @@ impl App {
             domain,
             password: a.password,
         };
-        let mut inbox = self.create_with_fallback(a.provider.as_deref(), &opts)?;
+        let mut inbox = self.create_with_fallback(a.provider.as_deref(), None, &opts)?;
         inbox.label = a.label;
         let p = provider::get(&inbox.provider)?;
         self.activate(&inbox, a.copy)?;
@@ -305,26 +318,47 @@ impl App {
         Ok(())
     }
 
-    fn create_with_fallback(&self, explicit: Option<&str>, opts: &CreateOpts) -> Result<Inbox> {
+    /// Creates an inbox with `explicit`, or else the first configured
+    /// provider (other than `exclude`) that supports `opts` and works.
+    fn create_with_fallback(
+        &self,
+        explicit: Option<&str>,
+        exclude: Option<&str>,
+        opts: &CreateOpts,
+    ) -> Result<Inbox> {
         if let Some(id) = explicit {
-            return provider::get(id)?.create(opts);
-        }
-        let order = self.config.provider_order();
-        let mut failures = Vec::new();
-        for id in &order {
             let p = provider::get(id)?;
+            let inbox = checked_address(p.as_ref(), p.create(opts)?)?;
+            self.note_unused_password(p.as_ref(), opts);
+            return Ok(inbox);
+        }
+        let mut candidates = Vec::new();
+        for id in self.config.provider_order() {
+            if exclude == Some(id.as_str()) {
+                continue;
+            }
+            let p = provider::get(&id)?;
             let caps = p.caps();
             if opts.user.is_some() && !caps.custom_user
                 || opts.domain.is_some() && !caps.choose_domain
-                || opts.password.is_some() && !caps.login
             {
                 continue;
             }
+            candidates.push(p);
+        }
+        // A password (maybe just TMPMAIL_PASSWORD in the environment) only
+        // matters to providers with accounts: try those first, not only those.
+        candidates.sort_by_key(|p| opts.password.is_some() && !p.caps().login);
+
+        let (mut failures, mut unavailable) = (Vec::new(), Vec::new());
+        for p in candidates {
             match p.create(opts) {
                 Ok(inbox) => {
+                    let inbox = checked_address(p.as_ref(), inbox)?;
                     if !failures.is_empty() {
                         self.note(&format!("using {} instead", p.name()));
                     }
+                    self.note_unused_password(p.as_ref(), opts);
                     return Ok(inbox);
                 }
                 Err(e) if e.is_provider_failure() => {
@@ -332,19 +366,33 @@ impl App {
                     failures.push(e.to_string());
                 }
                 // A requested domain may belong to a later provider.
-                Err(e @ Error::DomainUnavailable { .. }) => failures.push(e.to_string()),
+                Err(e @ Error::DomainUnavailable { .. }) => unavailable.push(e.to_string()),
                 Err(e) => return Err(e),
             }
         }
-        if failures.is_empty() {
-            return Err(Error::Usage(
-                "no configured provider supports these options (see `tmpmail providers`)".into(),
+        if !failures.is_empty() {
+            failures.extend(unavailable);
+            return Err(Error::Unreachable {
+                provider: "all providers".into(),
+                detail: failures.join("; "),
+            });
+        }
+        // Every provider was up but none offers that domain: a usage error.
+        if !unavailable.is_empty() {
+            return Err(Error::Usage(unavailable.join("; ")));
+        }
+        Err(Error::Usage(
+            "no configured provider supports these options (see `tmpmail providers`)".into(),
+        ))
+    }
+
+    fn note_unused_password(&self, p: &dyn Provider, opts: &CreateOpts) {
+        if opts.password.is_some() && !p.caps().login {
+            self.note(&format!(
+                "{} has no accounts, the password is not used",
+                p.name()
             ));
         }
-        Err(Error::Unreachable {
-            provider: "all providers".into(),
-            detail: failures.join("; "),
-        })
     }
 
     fn clipboard_cmd(&self) -> Option<String> {
@@ -402,7 +450,10 @@ impl App {
                 println!();
             }
             if !self.global.quiet || total > 1 {
-                println!("{}", self.bold(&format!("[ Inbox for {address} ]")));
+                println!(
+                    "{}",
+                    self.bold(&format!("[ Inbox for {} ]", clean_line(&address)))
+                );
             }
             match result {
                 Ok(list) if list.is_empty() => {
@@ -411,7 +462,10 @@ impl App {
                     }
                 }
                 Ok(list) => self.print_list(&list),
-                Err(e) => println!("{}", self.dim(&format!("  unavailable: {e}"))),
+                Err(e) => println!(
+                    "{}",
+                    self.dim(&format!("  unavailable: {}", clean_line(&e.to_string())))
+                ),
             }
         }
         if total > 1 && !self.global.quiet {
@@ -441,9 +495,15 @@ impl App {
     fn read(&mut self, a: ReadArgs) -> Result<()> {
         if a.raw {
             let raw = self.with_message(a.msg.id.as_deref(), |p, inbox, id| p.raw(inbox, id))?;
-            std::io::stdout()
-                .write_all(&raw)
-                .map_err(anyhow::Error::from)?;
+            let mut out = std::io::stdout();
+            // Exact bytes when piped; a sender's escape sequences must not
+            // reach a terminal, though.
+            if out.is_terminal() {
+                write!(out, "{}", clean(&String::from_utf8_lossy(&raw)))
+            } else {
+                out.write_all(&raw)
+            }
+            .map_err(anyhow::Error::from)?;
             return Ok(());
         }
         let msg = self.fetch(&a.msg)?;
@@ -508,7 +568,7 @@ impl App {
         let otp_re = a.otp_regex.as_deref().map(compile_plain).transpose()?;
         let (want_otp, want_link) = (a.otp, a.link);
         // `Some(found)` accepts the message; `found` is the code or link asked for.
-        let (n, msg, found) = self.wait_for(&a.filter, |m, body| {
+        let (n, msg, text, found) = self.wait_for(&a.filter, |m, body| {
             if want_otp {
                 extract::otp(&m.subject, body, otp_re.as_ref()).map(Some)
             } else if want_link {
@@ -520,7 +580,7 @@ impl App {
 
         let inbox = self.state.inboxes[n].address.clone();
         if let Some(code) = found.as_deref().filter(|_| want_otp) {
-            self.print_code(code, &msg, &inbox);
+            self.print_code(code, &msg, &text, otp_re.is_some(), &inbox);
         } else if let Some(link) = found {
             if self.global.json {
                 self.json_out(&json!({
@@ -545,11 +605,18 @@ impl App {
         Ok(())
     }
 
-    fn print_code(&self, code: &str, msg: &Message, inbox: &str) {
+    /// `body` is the message text the code came from. Heuristic candidates
+    /// are listed only when no custom regex picked the code.
+    fn print_code(&self, code: &str, msg: &Message, body: &str, custom: bool, inbox: &str) {
         if self.global.json {
+            let candidates = if custom {
+                Vec::new()
+            } else {
+                extract::otp_candidates(&msg.subject, body)
+            };
             self.json_out(&json!({
                 "code": code,
-                "candidates": extract::otp_candidates(&msg.subject, &message_body(msg)),
+                "candidates": candidates,
                 "inbox": inbox,
                 "message_id": msg.id,
                 "from": msg.from,
@@ -562,12 +629,13 @@ impl App {
 
     /// Polls the target inbox(es) until a message passes the filter and
     /// `accept` (given the message and its body text) returns `Some`, or
-    /// times out. Returns the inbox index, the message and what `accept` found.
+    /// times out. Returns the inbox index, the message, its body text and what
+    /// `accept` found.
     fn wait_for<T>(
         &mut self,
         f: &WaitFilter,
         accept: impl Fn(&Message, &str) -> Option<T>,
-    ) -> Result<(usize, Message, T)> {
+    ) -> Result<(usize, Message, String, T)> {
         let from = f.from.as_deref().map(compile).transpose()?;
         let subject = f.subject.as_deref().map(compile).transpose()?;
         let body = f.body.as_deref().map(compile).transpose()?;
@@ -628,7 +696,7 @@ impl App {
                         if all {
                             self.note(&format!("received by {}", self.state.inboxes[n].address));
                         }
-                        return Ok((n, msg, found));
+                        return Ok((n, msg, text, found));
                     }
                 }
             }
@@ -702,19 +770,20 @@ impl App {
 
     fn otp(&mut self, a: OtpArgs) -> Result<()> {
         let re = a.regex.as_deref().map(compile_plain).transpose()?;
-        let (inbox, msg, code) = if a.wait {
-            let (n, msg, code) = self.wait_for(&a.filter, |m, body| {
+        let (inbox, msg, body, code) = if a.wait {
+            let (n, msg, body, code) = self.wait_for(&a.filter, |m, body| {
                 extract::otp(&m.subject, body, re.as_ref())
             })?;
-            (self.state.inboxes[n].address.clone(), msg, Some(code))
+            (self.state.inboxes[n].address.clone(), msg, body, Some(code))
         } else {
             let msg = self.fetch(&a.msg)?;
-            let code = extract::otp(&msg.subject, &message_body(&msg), re.as_ref());
-            (self.current()?.address.clone(), msg, code)
+            let body = message_body(&msg);
+            let code = extract::otp(&msg.subject, &body, re.as_ref());
+            (self.current()?.address.clone(), msg, body, code)
         };
         match code {
             Some(code) => {
-                self.print_code(&code, &msg, &inbox);
+                self.print_code(&code, &msg, &body, re.is_some(), &inbox);
                 Ok(())
             }
             None => Err(Error::NotFound(format!(
@@ -770,7 +839,7 @@ impl App {
                 let Some(list) = self.poll(n, &mut targets, &mut failing, multi)? else {
                     continue;
                 };
-                let address = self.state.inboxes[n].address.clone();
+                let address = clean_line(&self.state.inboxes[n].address);
                 for s in list.iter().rev() {
                     if !seen.insert((n, s.id.clone())) {
                         continue;
@@ -826,9 +895,9 @@ impl App {
             let size = att.size.map(human_size).unwrap_or_default();
             println!(
                 "{}  {}  {}  {}",
-                att.id,
+                clean_line(&att.id),
                 clean_line(&att.filename),
-                self.dim(&att.content_type),
+                self.dim(&clean_line(&att.content_type)),
                 size
             );
         }
@@ -901,7 +970,7 @@ impl App {
         if self.global.json {
             self.json_out(&self.view(inbox));
         } else {
-            println!("{}", inbox.address);
+            println!("{}", clean_line(&inbox.address));
             if inbox.is_expired() {
                 self.warn("this inbox has expired; create a new one with `tmpmail new`");
             }
@@ -929,7 +998,7 @@ impl App {
             .light_color(qrcode::render::unicode::Dense1x2::Dark)
             .quiet_zone(true)
             .build();
-        println!("{art}\n{address}");
+        println!("{art}\n{}", clean_line(&address));
         Ok(())
     }
 
@@ -951,8 +1020,8 @@ impl App {
 
     fn inboxes(&mut self, a: InboxesArgs) -> Result<()> {
         if a.prune {
-            let pruned = self.state.prune_expired();
-            self.save_state()?;
+            let (state, pruned) = self.store.update(State::prune_expired)?;
+            self.state = state;
             self.note(&format!("forgot {pruned} expired inbox(es)"));
         }
         if self.global.json {
@@ -978,7 +1047,7 @@ impl App {
             };
             println!(
                 "{mark} {}{label}  {}  {}",
-                self.bold(&i.address),
+                self.bold(&clean_line(&i.address)),
                 self.dim(&i.provider),
                 self.dim(&status)
             );
@@ -989,12 +1058,14 @@ impl App {
     fn use_inbox(&mut self, address: &str) -> Result<()> {
         let n = self.state.resolve(Some(address))?;
         let address = self.state.inboxes[n].address.clone();
-        self.state.active = Some(address.clone());
-        self.save_state()?;
+        let active = address.clone();
+        self.state = self.store.update(|s| s.active = Some(active))?.0;
         if self.global.json {
-            self.json_out(&self.view(&self.state.inboxes[n]));
+            if let Some(n) = self.state.position(&address) {
+                self.json_out(&self.view(&self.state.inboxes[n]));
+            }
         } else {
-            println!("{address}");
+            println!("{}", clean_line(&address));
         }
         Ok(())
     }
@@ -1016,7 +1087,7 @@ impl App {
                 ));
             }
         };
-        let mut inbox = p.login(&a.address, &password)?;
+        let mut inbox = checked_address(p.as_ref(), p.login(&a.address, &password)?)?;
         inbox.label = a.label;
         self.activate(&inbox, false)
     }
@@ -1034,12 +1105,11 @@ impl App {
                 ));
             }
         }
-        let removed = self.state.remove(n);
-        self.save_state()?;
+        self.forget(&inbox.address)?;
         if self.global.json {
-            self.json_out(&json!({ "dropped": removed.address, "active": self.state.active }));
+            self.json_out(&json!({ "dropped": inbox.address, "active": self.state.active }));
         } else {
-            self.note(&format!("dropped {}", removed.address));
+            self.note(&format!("dropped {}", inbox.address));
         }
         Ok(())
     }
@@ -1048,22 +1118,34 @@ impl App {
         let old = self.current()?.clone();
         // Prefer the same provider, fall back like `new` does.
         let opts = CreateOpts::default();
-        let mut inbox = match provider::get(&old.provider)?.create(&opts) {
+        let p = provider::get(&old.provider)?;
+        let mut inbox = match p.create(&opts).and_then(|i| checked_address(p.as_ref(), i)) {
             Ok(i) => i,
             Err(e) if e.is_provider_failure() => {
                 self.warn(&format!("{e}, trying other providers"));
-                self.create_with_fallback(None, &opts)?
+                self.create_with_fallback(None, Some(&old.provider), &opts)?
             }
             Err(e) => return Err(e),
         };
         inbox.label = old.label.clone();
         if !a.keep {
-            if let Some(n) = self.state.find(&old.address) {
-                let mut gone = self.state.remove(n);
-                let _ = provider::get(&gone.provider).map(|p| p.delete_inbox(&mut gone));
-            }
+            let _ = p.delete_inbox(&mut old.clone());
+            self.forget(&old.address)?;
         }
         self.activate(&inbox, a.copy)
+    }
+
+    /// Removes a stored inbox (by exact address) from the state file.
+    fn forget(&mut self, address: &str) -> Result<()> {
+        self.state = self
+            .store
+            .update(|s| {
+                if let Some(k) = s.position(address) {
+                    s.remove(k);
+                }
+            })?
+            .0;
+        Ok(())
     }
 
     fn providers(&mut self, a: ProvidersArgs) -> Result<()> {
@@ -1116,7 +1198,10 @@ impl App {
             let status = match &r.status {
                 None => String::new(),
                 Some(Health { ms: Some(ms), .. }) => format!("  ok {ms}ms"),
-                Some(h) => format!("  DOWN: {}", h.error.as_deref().unwrap_or_default()),
+                Some(h) => format!(
+                    "  DOWN: {}",
+                    clean_line(h.error.as_deref().unwrap_or_default())
+                ),
             };
             println!(
                 "{order:>3} {:<13} {:<15} {}{}",
@@ -1143,6 +1228,27 @@ fn check_health(id: &str) -> Health {
             ms: None,
             error: Some(e.to_string()),
         },
+    }
+}
+
+/// Rejects an address a provider returned that couldn't be a real one, such
+/// as one carrying terminal escapes: it is printed and stored as is.
+fn checked_address(p: &dyn Provider, inbox: Inbox) -> Result<Inbox> {
+    let a = &inbox.address;
+    // `clean_line` drops control and bidi characters and folds whitespace.
+    let plausible = a.split('@').count() == 2
+        && !a.starts_with('@')
+        && !a.ends_with('@')
+        && !a.contains(char::is_whitespace)
+        && clean_line(a) == *a;
+    if plausible {
+        Ok(inbox)
+    } else {
+        Err(Error::BadResponse {
+            provider: p.id().to_string(),
+            detail: format!("invalid address {:?}", clean_line(a)),
+            status: None,
+        })
     }
 }
 
@@ -1266,6 +1372,19 @@ mod tests {
         assert_eq!(unique_path(&p), p);
         std::fs::write(&p, "x").unwrap();
         assert_eq!(unique_path(&p), dir.path().join("a (1).txt"));
+    }
+
+    #[test]
+    fn provider_addresses_are_validated() {
+        let p = provider::get("mailtm").unwrap();
+        let ok = |a: &str| {
+            checked_address(p.as_ref(), Inbox::new("mailtm", a.into(), Value::Null)).is_ok()
+        };
+        assert!(ok("otter1@maxxspace.com"));
+        assert!(!ok("x\u{1b}]52;c;AAAA\u{7}@evil.com"));
+        assert!(!ok("a\u{202e}b@x.com"));
+        assert!(!ok("no-at-sign"));
+        assert!(!ok("a b@x.com"));
     }
 
     #[test]
