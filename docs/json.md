@@ -33,9 +33,9 @@ Credentials are never printed.
 
 ## Message summary: `ls` and `watch` lines
 
-`ls` returns `{"address": "...", "messages": [Summary, ...]}`, newest first.
+`ls` returns `{"address": "...", "created_at": "RFC 3339", "messages": [Summary, ...]}`, newest first.
 
-`ls --all-inboxes` returns `{"inboxes": [{"address", "messages": [...], "error"?}, ...]}`.
+`ls --all-inboxes` returns `{"inboxes": [{"address", "created_at", "messages": [...], "error"?}, ...]}`.
 `error` (`{"kind", "message"}`) is present only for an inbox that couldn't be read.
 
 `watch --json` prints one Summary per line as messages arrive, plus an `"inbox"` field

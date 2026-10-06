@@ -414,26 +414,36 @@ impl App {
         let mut sections = Vec::new();
         for n in targets {
             let address = self.state.inboxes[n].address.clone();
+            let created = self.state.inboxes[n].created_at;
             let result = self.with_inbox_at(n, |p, inbox| Self::sorted_list(p, inbox));
             match result {
-                Ok(list) => sections.push((address, Ok(list))),
+                Ok(list) => sections.push((address, created, Ok(list))),
                 // With -a, one dead inbox must not hide the others.
-                Err(e) if a.all_inboxes => sections.push((address, Err(e))),
+                Err(e) if a.all_inboxes => sections.push((address, created, Err(e))),
                 Err(e) => return Err(e),
             }
         }
 
         if self.global.json {
             if !a.all_inboxes {
-                let (address, list) = sections.remove(0);
-                self.json_out(&json!({ "address": address, "messages": list? }));
+                let (address, created, list) = sections.remove(0);
+                self.json_out(&json!({
+                    "address": address,
+                    "created_at": created,
+                    "messages": list?,
+                }));
             } else {
                 let all: Vec<Value> = sections
                     .iter()
-                    .map(|(address, r)| match r {
-                        Ok(list) => json!({ "address": address, "messages": list }),
+                    .map(|(address, created, r)| match r {
+                        Ok(list) => json!({
+                            "address": address,
+                            "created_at": created,
+                            "messages": list,
+                        }),
                         Err(e) => json!({
                             "address": address,
+                            "created_at": created,
                             "messages": [],
                             "error": { "kind": e.kind(), "message": e.to_string() },
                         }),
@@ -445,14 +455,22 @@ impl App {
         }
 
         let total = sections.len();
-        for (k, (address, result)) in sections.into_iter().enumerate() {
+        for (k, (address, created, result)) in sections.into_iter().enumerate() {
             if k > 0 {
                 println!();
             }
             if !self.global.quiet || total > 1 {
+                let since = format!(
+                    "created {} ({})",
+                    created
+                        .with_timezone(&chrono::Local)
+                        .format("%Y-%m-%d %H:%M"),
+                    relative(created),
+                );
                 println!(
-                    "{}",
-                    self.bold(&format!("[ Inbox for {} ]", clean_line(&address)))
+                    "{}  {}",
+                    self.bold(&format!("[ Inbox for {} ]", clean_line(&address))),
+                    self.dim(&since),
                 );
             }
             match result {
