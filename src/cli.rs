@@ -7,15 +7,14 @@ and Maildrop (public inboxes, opt-in). `new` falls back to the next provider whe
 one is down. Thanks to mail.tm (https://mail.tm) for its free API.
 
 Exit codes: 0 ok, 1 error, 2 wait timed out, 3 provider failure,
-4 nothing found (no inbox, message or code), 64 usage error.
-
-Compatible with the original tmpmail: -g, -r, -d, -c, -t and `tmpmail ID` still work.";
+4 nothing found (no inbox, message or code), 64 usage error.";
 
 #[derive(Debug, Parser)]
 #[command(
     name = "tmpmail",
     version,
     about = "Temporary email from the terminal",
+    flatten_help = true,
     after_help = AFTER_HELP
 )]
 pub struct Cli {
