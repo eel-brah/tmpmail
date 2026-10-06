@@ -133,7 +133,13 @@ impl DropMail {
     /// when the old one expired.
     fn mails(&self, inbox: &mut Inbox) -> Result<Vec<Value>> {
         let session = inbox.cred_str("session_id").unwrap_or_default().to_string();
-        let mut data = self.gql_inbox(inbox, MAILS_QUERY, json!({ "id": session }))?;
+        let mut data = match self.gql_inbox(inbox, MAILS_QUERY, json!({ "id": session })) {
+            // The API reports a dead session as an error, not a null session.
+            Err(Error::BadResponse { detail, .. }) if detail.contains("session_not_found") => {
+                Value::Null
+            }
+            other => other?,
+        };
         let session = &mut data["session"];
         if session.is_object() {
             if let Some(exp) = parse_date(&session["expiresAt"]) {
@@ -386,7 +392,7 @@ mod tests {
         // Session gone: list must restore the address into a new session.
         s.mock("POST", "/api/graphql/af_tok")
             .match_body(Matcher::Regex("session\\(id".into()))
-            .with_body(r#"{"data":{"session":null}}"#)
+            .with_body(r#"{"errors":[{"message":"session_not_found"}],"data":{"session":null}}"#)
             .create();
         s.mock("POST", "/api/graphql/af_tok")
             .match_body(Matcher::Regex("withAddress: false".into()))
