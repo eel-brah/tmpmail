@@ -34,6 +34,7 @@ fn shared_client() -> &'static Client {
 
 /// Thin wrapper around a blocking client that turns every failure into a typed
 /// [`Error`] naming the provider, so a dead backend never surfaces as garbage.
+#[derive(Clone)]
 pub struct Http {
     client: &'static Client,
     provider: &'static str,
@@ -94,8 +95,25 @@ impl Http {
     /// POSTs a GraphQL query and returns its `data`, turning a non-empty
     /// `errors` array into a typed error.
     pub fn graphql(&self, url: &str, query: &str, variables: &Value) -> Result<Value> {
+        self.graphql_within(url, query, variables, None)
+    }
+
+    /// [`Http::graphql`] with its own timeout, for calls the server holds open.
+    pub fn graphql_within(
+        &self,
+        url: &str,
+        query: &str,
+        variables: &Value,
+        timeout: Option<Duration>,
+    ) -> Result<Value> {
         let body = json!({ "query": query, "variables": variables });
-        let mut v: Value = self.json(|| self.client.post(url).json(&body))?;
+        let mut v: Value = self.json(|| {
+            let req = self.client.post(url).json(&body);
+            match timeout {
+                Some(t) => req.timeout(t),
+                None => req,
+            }
+        })?;
         if let Some(errors) = v
             .get("errors")
             .and_then(Value::as_array)
@@ -139,7 +157,7 @@ impl Http {
         }
     }
 
-    fn transport_error(&self, e: reqwest::Error) -> Error {
+    pub fn transport_error(&self, e: reqwest::Error) -> Error {
         let detail = if e.is_timeout() {
             "request timed out".to_string()
         } else if e.is_connect() {

@@ -5,6 +5,7 @@ mod error;
 mod extract;
 mod http;
 mod provider;
+mod push;
 mod render;
 mod store;
 mod system;
@@ -33,14 +34,24 @@ fn main() {
         }
     };
 
-    if let Command::Completions { shell } = cli.command {
-        clap_complete::generate(
-            shell,
-            &mut Cli::command(),
-            "tmpmail",
-            &mut std::io::stdout(),
-        );
-        return;
+    match cli.command {
+        Command::Completions { shell } => {
+            clap_complete::generate(
+                shell,
+                &mut Cli::command(),
+                "tmpmail",
+                &mut std::io::stdout(),
+            );
+            return;
+        }
+        Command::Man { output } => {
+            if let Err(e) = man(output.as_deref()) {
+                eprintln!("tmpmail: {e}");
+                std::process::exit(1);
+            }
+            return;
+        }
+        _ => {}
     }
 
     let json = cli.global.json;
@@ -48,6 +59,19 @@ fn main() {
     if let Err(e) = result {
         report(&e, json);
         std::process::exit(e.exit_code());
+    }
+}
+
+/// The man page on stdout, or every page (one per command) written to `dir`.
+fn man(dir: Option<&std::path::Path>) -> std::io::Result<()> {
+    match dir {
+        Some(dir) => {
+            std::fs::create_dir_all(dir)?;
+            clap_mangen::generate_to(Cli::command(), dir)?;
+            eprintln!("wrote man pages to {}", dir.display());
+            Ok(())
+        }
+        None => clap_mangen::Man::new(Cli::command()).render(&mut std::io::stdout()),
     }
 }
 

@@ -6,11 +6,12 @@ use chrono::{Duration, Utc};
 use serde_json::{Value, json};
 
 use super::{
-    Attachment, Capabilities, CreateOpts, Inbox, Message, Provider, Summary, base_url,
-    domain_unavailable, opt_str, parse_date, str_field, with_token,
+    Attachment, Capabilities, CreateOpts, Inbox, Message, Provider, PushEvent, PushStream, Summary,
+    base_url, domain_unavailable, opt_str, parse_date, str_field, with_token,
 };
 use std::cell::RefCell;
 use std::path::PathBuf;
+use std::time::{Duration as StdDuration, Instant};
 
 use crate::error::{Error, Result, message_not_found, unsupported};
 use crate::http::Http;
@@ -20,6 +21,10 @@ const BASE: &str = "https://dropmail.me";
 /// Longer lifetimes cost "credits" and trigger a captcha; 1d is free.
 const TOKEN_LIFETIME: &str = "1d";
 const TOKEN_REUSE_HOURS: i64 = 23;
+
+/// The server holds a subscription request open until mail arrives (about
+/// three minutes at most), so allow a little more than that.
+const LONG_POLL: StdDuration = StdDuration::from_secs(240);
 
 const MAILS_QUERY: &str = "query($id: ID!) { session(id: $id) { expiresAt mails { \
     id fromAddr toAddr receivedAt headerFrom headerSubject text html downloadUrl \
@@ -324,6 +329,14 @@ impl Provider for DropMail {
         self.http.bytes(|| self.http.client().get(&url))
     }
 
+    fn push(&self, inbox: &Inbox) -> Option<Box<dyn PushStream>> {
+        Some(Box::new(MailReceived {
+            url: format!("{}/api/graphql/{}", self.base, inbox.cred_str("token")?),
+            session: inbox.cred_str("session_id")?.to_string(),
+            http: self.http.clone(),
+        }))
+    }
+
     fn attachment(&self, _inbox: &mut Inbox, _msg: &Message, att: &Attachment) -> Result<Vec<u8>> {
         let url = att
             .url
@@ -356,6 +369,48 @@ impl DropMail {
             return Err(self.http.bad("no domains"));
         }
         Ok(list)
+    }
+}
+
+/// The `sessionMailReceived` subscription, over HTTP long-polling: each
+/// request returns one new mail, or nothing once the server's wait runs out.
+/// (The API also takes it over WebSocket; this needs no extra client.)
+struct MailReceived {
+    url: String,
+    session: String,
+    http: Http,
+}
+
+impl PushStream for MailReceived {
+    fn run(self: Box<Self>, event: &mut dyn FnMut(PushEvent) -> bool) -> Result<()> {
+        if !event(PushEvent::Connected) {
+            return Ok(());
+        }
+        loop {
+            let started = Instant::now();
+            let data = match self.http.graphql_within(
+                &self.url,
+                "subscription($id: ID!) { sessionMailReceived(id: $id) { id } }",
+                &json!({ "id": self.session }),
+                Some(LONG_POLL),
+            ) {
+                Ok(data) => data,
+                // Our own timeout, not a failure: ask again.
+                Err(_) if started.elapsed() >= LONG_POLL => continue,
+                Err(e) => return Err(e),
+            };
+            if data["sessionMailReceived"].is_object() {
+                if !event(PushEvent::Mail) {
+                    return Ok(());
+                }
+            } else if started.elapsed() < StdDuration::from_secs(5) {
+                // An immediate empty answer would make this loop spin; let
+                // the caller reconnect later instead.
+                return Ok(());
+            } else if !event(PushEvent::Alive) {
+                return Ok(());
+            }
+        }
     }
 }
 
@@ -404,6 +459,36 @@ mod tests {
             .create();
         assert!(p.list(&mut inbox).unwrap().is_empty());
         assert_eq!(inbox.cred_str("session_id"), Some("S2"));
+    }
+
+    #[test]
+    fn subscription_reports_new_mail() {
+        let mut s = Server::new();
+        s.mock("POST", "/api/graphql/af_tok")
+            .match_body(Matcher::Regex("sessionMailReceived".into()))
+            .match_body(Matcher::PartialJson(json!({"variables": {"id": "S1"}})))
+            .with_body(r#"{"data":{"sessionMailReceived":{"id":"M1"}}}"#)
+            .create();
+        let p = DropMail {
+            base: s.url(),
+            http: Http::new("dropmail"),
+            cache: None,
+            last_mails: RefCell::default(),
+        };
+        let inbox = Inbox::new(
+            "dropmail",
+            "abc@10mail.org".into(),
+            json!({"token":"af_tok","session_id":"S1"}),
+        );
+        let mut events = Vec::new();
+        p.push(&inbox)
+            .expect("dropmail has push")
+            .run(&mut |e| {
+                events.push(e);
+                e != PushEvent::Mail
+            })
+            .unwrap();
+        assert_eq!(events, [PushEvent::Connected, PushEvent::Mail]);
     }
 
     #[test]

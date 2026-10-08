@@ -39,7 +39,8 @@ Credentials are never printed.
 `error` (`{"kind", "message"}`) is present only for an inbox that couldn't be read.
 
 `watch --json` prints one Summary per line as messages arrive, plus an `"inbox"` field
-with the receiving address.
+with the receiving address. With `--rotate`, each switch to a new address prints a line
+`{"rotated": {"from": "old@...", "to": "new@..."}}`; tell the two apart by the `rotated` key.
 
 ```json
 {

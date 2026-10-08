@@ -122,6 +122,13 @@ pub enum Command {
 
     /// Print shell completions
     Completions { shell: Shell },
+
+    /// Print the man page, or write one page per command with --output
+    Man {
+        /// Directory to write tmpmail.1 and tmpmail-COMMAND.1 into
+        #[arg(long, short)]
+        output: Option<std::path::PathBuf>,
+    },
 }
 
 #[derive(Debug, Args)]
@@ -181,6 +188,10 @@ pub struct ReadArgs {
     /// Print the raw RFC 822 source
     #[arg(long)]
     pub raw: bool,
+
+    /// Print long messages straight to the terminal instead of a pager
+    #[arg(long)]
+    pub no_pager: bool,
 
     /// Text only (the default; kept for tmpmail compatibility)
     #[arg(long, short, hide = true)]
@@ -295,6 +306,61 @@ pub struct WatchArgs {
     /// Seconds between checks [default: 5]
     #[arg(long)]
     pub interval: Option<u64>,
+
+    /// Switch to a fresh address this often, e.g. 30m, 2h (at least 1m)
+    #[arg(long, value_parser = parse_rotation, conflicts_with = "all_inboxes")]
+    pub rotate: Option<std::time::Duration>,
+
+    /// With --rotate: keep old inboxes instead of dropping them
+    #[arg(long, requires = "rotate")]
+    pub keep: bool,
+
+    /// With --rotate: copy each new address to the clipboard
+    #[arg(long, short, requires = "rotate")]
+    pub copy: bool,
+}
+
+/// Parses `90`, `90s`, `30m`, `2h`, `1d` or combinations such as `1h30m`.
+pub fn parse_duration(s: &str) -> Result<std::time::Duration, String> {
+    let bad = || format!("invalid duration {s:?}, use e.g. 90s, 30m or 2h");
+    let s = s.trim();
+    if let Ok(secs) = s.parse::<u64>() {
+        return Ok(std::time::Duration::from_secs(secs));
+    }
+    let (mut total, mut digits) = (0u64, String::new());
+    for c in s.chars() {
+        if c.is_ascii_digit() {
+            digits.push(c);
+            continue;
+        }
+        let unit = match c {
+            's' => 1,
+            'm' => 60,
+            'h' => 3600,
+            'd' => 86400,
+            _ => return Err(bad()),
+        };
+        let n: u64 = digits.parse().map_err(|_| bad())?;
+        total = n
+            .checked_mul(unit)
+            .and_then(|v| total.checked_add(v))
+            .ok_or_else(bad)?;
+        digits.clear();
+    }
+    if !digits.is_empty() || s.is_empty() {
+        return Err(bad());
+    }
+    Ok(std::time::Duration::from_secs(total))
+}
+
+/// A rotation period: rotating faster than once a minute only burns
+/// through provider rate limits.
+fn parse_rotation(s: &str) -> Result<std::time::Duration, String> {
+    let d = parse_duration(s)?;
+    if d.as_secs() < 60 {
+        return Err("rotate at most once a minute (e.g. 1m, 30m, 2h)".into());
+    }
+    Ok(d)
 }
 
 #[derive(Debug, Args)]
@@ -486,6 +552,33 @@ mod tests {
         assert_eq!(rw("--help"), "--help");
         assert_eq!(rw("--version"), "--version");
         assert_eq!(rw("read 3 --json"), "read 3 --json");
+    }
+
+    #[test]
+    fn durations() {
+        let secs = |s| parse_duration(s).map(|d| d.as_secs());
+        assert_eq!(secs("90"), Ok(90));
+        assert_eq!(secs("90s"), Ok(90));
+        assert_eq!(secs("30m"), Ok(1800));
+        assert_eq!(secs("1h30m"), Ok(5400));
+        assert_eq!(secs("2d"), Ok(172800));
+        assert!(secs("").is_err());
+        assert!(secs("m").is_err());
+        assert!(secs("10x").is_err());
+        assert!(secs("5m3").is_err());
+        assert!(parse_rotation("30s").is_err());
+        assert!(parse_rotation("1m").is_ok());
+    }
+
+    #[test]
+    fn man_page_lists_the_commands() {
+        use clap::CommandFactory;
+        let mut out = Vec::new();
+        clap_mangen::Man::new(Cli::command())
+            .render(&mut out)
+            .unwrap();
+        let page = String::from_utf8(out).unwrap();
+        assert!(page.contains("tmpmail\\-watch(1)"), "{page}");
     }
 
     #[test]

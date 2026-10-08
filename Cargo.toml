@@ -12,6 +12,7 @@ anyhow = "1.0.104"
 chrono = { version = "0.4.45", features = ["serde"] }
 clap = { version = "4.6.7", features = ["derive", "env", "wrap_help"] }
 clap_complete = "4.6.11"
+clap_mangen = "0.3.3"
 dirs = "7.0.0"
 html2text = "0.17.1"
 qrcode = "0.14.1"

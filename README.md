@@ -57,11 +57,11 @@ tmpmail --json ls | jq '.messages[0].subject'
 |---|---|
 | `new [ADDR] [-u USER] [-d DOMAIN] [-p PROVIDER] [-l LABEL] [-c]` | Create an inbox (alias `generate`) |
 | `ls [-a]` | List messages, newest first, `*` = unread; `-a` = all your inboxes |
-| `read [ID\|N] [--recent] [--html [--images]] [--raw]` | Show a message |
+| `read [ID\|N] [--recent] [--html [--images]] [--raw] [--no-pager]` | Show a message (long ones in a pager) |
 | `wait [-a] [--from RE] [--subject RE] [--body RE] [--timeout S] [--otp\|--link] [--delete]` | Block until a matching message arrives |
 | `otp [ID] [--regex RE] [--wait ...]` | Extract a verification code |
 | `links [ID] [--match RE] [--first] [--open]` | Extract links, verification links first |
-| `watch [-a] [--notify]` | Stream new messages (JSON lines with `--json`); `-a` = all inboxes |
+| `watch [-a] [--notify] [--rotate 30m]` | Stream new messages (JSON lines with `--json`); `-a` = all inboxes; `--rotate` = fresh address on a timer |
 | `attachments ID`, `save ID [ATT...] [-o DIR]` | List / download attachments |
 | `delete ID`, `delete --all` | Delete messages |
 | `whoami`, `copy`, `qr` | Show / copy / QR-code the active address |
@@ -69,7 +69,7 @@ tmpmail --json ls | jq '.messages[0].subject'
 | `login ADDR --password PW` | Attach an existing mail.tm / mail.gw account |
 | `rotate [--keep]` | Replace the active address with a fresh one |
 | `domains [-p PROVIDER]`, `providers [--check]` | Domains, provider capabilities and live status |
-| `completions bash\|zsh\|fish` | Shell completions |
+| `completions bash\|zsh\|fish`, `man [-o DIR]` | Shell completions, man pages |
 
 Messages can be referenced by full id, by their number in `tmpmail ls`, or by a unique id prefix.
 
@@ -79,15 +79,19 @@ Messages can be referenced by full id, by their number in `tmpmail ls`, or by a 
 
 | Id | Service | Inbox | Lifetime | Notes |
 |---|---|---|---|---|
-| `mailtm` | [mail.tm](https://mail.tm) | private | until deleted, mail kept 7 days | default; custom username, attachments, delete, login |
-| `dropmail` | [DropMail.me](https://dropmail.me) | private | renewed while used, restorable | many domains, attachments |
-| `guerrilla` | [Guerrilla Mail](https://www.guerrillamail.com) | private | 60 min | custom username |
+| `mailtm` | [mail.tm](https://mail.tm) | private | until deleted, mail kept 7 days | default; custom username, attachments, delete, login, push |
+| `dropmail` | [DropMail.me](https://dropmail.me) | private | renewed while used, restorable | many domains, attachments, push |
+| `guerrilla` | [Guerrilla Mail](https://www.guerrillamail.com) | private | 60 min | custom username, attachments |
 | `tempmail_lol` | [tempmail.lol](https://tempmail.lol) | private | 1 hour | simplest, last resort |
 | `mailgw` | [mail.gw](https://mail.gw) | private | like mail.tm | same software as mail.tm |
 | `maildrop` | [Maildrop](https://maildrop.cc) | **public** | 24 h idle | opt-in only (`-p maildrop`): anyone can read it; first mail may be delayed by greylisting |
 
 `tmpmail new` tries them in order `mailtm, dropmail, guerrilla, tempmail_lol, mailgw`,
-skipping providers that can't satisfy the options you passed (e.g. `--user`).
+skipping providers that can't satisfy the options you passed (e.g. `--user`). With `-d`,
+it goes straight to a provider that has the domain.
+
+`wait` and `watch` hear about new mail at once from providers with push (mail.tm, DropMail)
+and poll the others every 5 seconds.
 Only documented APIs are used. Many sites block known disposable domains; trying another
 provider or domain usually helps.
 
@@ -101,12 +105,15 @@ Thanks to **mail.tm** for its free API; per its terms this client links back to 
 providers = ["mailtm", "guerrilla"]   # fallback order for `new`
 browser = "firefox"                   # for --html and links --open
 clipboard_cmd = "wl-copy"
+pager = "less"                        # for long messages in `read` (default $PAGER, else less)
 poll_interval = 5                     # seconds, for wait/watch
 timeout = 180                         # default wait timeout
+push = true                           # live push from mail.tm/DropMail in wait/watch
 ```
 
 Environment: `TMPMAIL_PROVIDER` (comma list), `TMPMAIL_TIMEOUT`, `TMPMAIL_POLL_INTERVAL`,
-`TMPMAIL_INBOX`, `TMPMAIL_PASSWORD`, `TMPMAIL_STATE_DIR`, `TMPMAIL_DROPMAIL_TOKEN`, `NO_COLOR`.
+`TMPMAIL_PUSH`, `TMPMAIL_INBOX`, `TMPMAIL_PASSWORD`, `TMPMAIL_STATE_DIR`,
+`TMPMAIL_DROPMAIL_TOKEN`, `PAGER`, `NO_COLOR`.
 
 ## Privacy and security
 
@@ -114,7 +121,8 @@ Environment: `TMPMAIL_PROVIDER` (comma list), `TMPMAIL_TIMEOUT`, `TMPMAIL_POLL_I
   (`~/.local/state/tmpmail`), directory `0700`, file `0600`, never in `/tmp`.
 - Message text is stripped of terminal control sequences before printing.
 - `read --html` writes a sanitized copy (no scripts, forms, frames; strict CSP) and
-  **blocks remote images** (tracking pixels) unless you pass `--images`.
+  **blocks remote images** (tracking pixels) unless you pass `--images`. These copies are
+  deleted after a day.
 - Attachment names are sanitized so they can't escape the target directory, and
   existing files are never overwritten.
 - No telemetry. The only network traffic is to the provider you use.

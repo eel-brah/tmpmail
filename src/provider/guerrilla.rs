@@ -6,13 +6,16 @@ use chrono::{Duration, Utc};
 use serde_json::{Value, json};
 
 use super::{
-    Capabilities, CreateOpts, Inbox, Message, Provider, Summary, base_url, domain_unavailable,
-    parse_date, str_field,
+    Attachment, Capabilities, CreateOpts, Inbox, Message, Provider, Summary, base_url,
+    domain_unavailable, parse_date, str_field,
 };
 use crate::error::{Result, message_not_found};
 use crate::http::Http;
 
 const BASE: &str = "https://api.guerrillamail.com/ajax.php";
+/// Attachments are served by the website, not the API; the API's `sid_token`
+/// doubles as the site's session cookie.
+const WEB: &str = "https://www.guerrillamail.com";
 
 /// Guerrilla has no domain-list endpoint; these are the domains its web UI
 /// offers, all of which deliver to the same mailbox.
@@ -32,6 +35,7 @@ const DOMAINS: &[&str] = &[
 
 pub struct Guerrilla {
     base: String,
+    web: String,
     http: Http,
 }
 
@@ -39,6 +43,7 @@ impl Guerrilla {
     pub fn new() -> Self {
         Guerrilla {
             base: base_url("guerrilla", BASE),
+            web: base_url("guerrilla_web", WEB),
             http: Http::new("guerrilla"),
         }
     }
@@ -110,6 +115,24 @@ fn truthy(v: &Value) -> bool {
     v.as_i64().unwrap_or(0) != 0 || v.as_str().is_some_and(|s| s != "0")
 }
 
+/// `att_info` lists each file as `{"f": name, "t": type, "p": part id}`, the
+/// shape Guerrilla's own web client reads.
+fn attachments(v: &Value) -> Vec<Attachment> {
+    v["att_info"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|a| Attachment {
+            id: id_of(&a["p"]),
+            filename: str_field(a, "f").to_string(),
+            content_type: str_field(a, "t").to_string(),
+            size: a["s"].as_u64(),
+            url: None,
+        })
+        .filter(|a| !a.id.is_empty())
+        .collect()
+}
+
 /// Guerrilla HTML-escapes subjects and excerpts.
 fn decode_entities(s: &str) -> String {
     s.replace("&#039;", "'")
@@ -135,7 +158,7 @@ impl Provider for Guerrilla {
             private: true,
             custom_user: true,
             choose_domain: true,
-            attachments: false,
+            attachments: true,
             raw: false,
             delete_message: true,
             delete_inbox: true,
@@ -212,8 +235,21 @@ impl Provider for Guerrilla {
             // Even plain-text mail comes back HTML-escaped inside <pre>.
             text: None,
             html: Some(body),
-            attachments: Vec::new(),
+            attachments: attachments(&v),
         })
+    }
+
+    fn attachment(&self, inbox: &mut Inbox, msg: &Message, att: &Attachment) -> Result<Vec<u8>> {
+        let sid = inbox.cred_str("sid_token").unwrap_or_default().to_string();
+        let query = [
+            ("get_att", ""),
+            ("email_id", msg.id.as_str()),
+            ("part_id", att.id.as_str()),
+            ("sid_token", sid.as_str()),
+        ];
+        let url = format!("{}/", self.web);
+        self.http
+            .bytes(|| self.http.client().get(&url).query(&query))
     }
 
     fn delete_message(&self, inbox: &mut Inbox, id: &str) -> Result<()> {
@@ -257,12 +293,23 @@ mod tests {
             .with_body(
                 r#"{"mail_id":7,"mail_from":"x@y.z","mail_subject":"It&#039;s here",
                 "mail_body":"<b>code 4242</b>","content_type":"text/html","mail_timestamp":1791194910,
+                "att":1,"att_info":[{"f":"report.pdf","t":"application/pdf","p":"2"}],
                 "sid_token":"sid1"}"#,
             )
             .create();
 
+        s.mock("GET", "/")
+            .match_query(Matcher::AllOf(vec![
+                Matcher::UrlEncoded("email_id".into(), "7".into()),
+                Matcher::UrlEncoded("part_id".into(), "2".into()),
+                Matcher::UrlEncoded("sid_token".into(), "sid1".into()),
+            ]))
+            .with_body("%PDF-1.4")
+            .create();
+
         let p = Guerrilla {
             base: s.url() + "/",
+            web: s.url(),
             http: Http::new("guerrilla"),
         };
         let mut inbox = p
@@ -282,5 +329,11 @@ mod tests {
         let msg = p.get(&mut inbox, "7").unwrap();
         assert_eq!(msg.html.as_deref(), Some("<b>code 4242</b>"));
         assert!(msg.text.is_none());
+        assert_eq!(msg.attachments.len(), 1);
+        assert_eq!(msg.attachments[0].filename, "report.pdf");
+        assert_eq!(msg.attachments[0].content_type, "application/pdf");
+
+        let data = p.attachment(&mut inbox, &msg, &msg.attachments[0]).unwrap();
+        assert_eq!(data, b"%PDF-1.4");
     }
 }

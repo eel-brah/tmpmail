@@ -171,6 +171,27 @@ pub struct CreateOpts {
     pub password: Option<String>,
 }
 
+/// What a [`PushStream`] reports to its listener.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum PushEvent {
+    /// The stream is open; mail will be announced from now on.
+    Connected,
+    /// Something arrived (or changed) in the inbox: time to list it.
+    Mail,
+    /// A keep-alive, so the listener can stop a stream that is otherwise idle.
+    Alive,
+}
+
+/// A live connection that announces new mail, so `wait` and `watch` can list
+/// the inbox at once instead of on their next tick. It runs on its own
+/// thread, so it carries copies of the credentials it needs.
+pub trait PushStream: Send {
+    /// Blocks while the connection lasts, passing each event to `event`, and
+    /// returns once the server closes it, it fails, or `event` returns false.
+    /// The caller reconnects.
+    fn run(self: Box<Self>, event: &mut dyn FnMut(PushEvent) -> bool) -> Result<()>;
+}
+
 /// One temp-mail backend. Methods take `&mut Inbox` so a provider can refresh
 /// tokens or sessions in place; callers persist the inbox afterwards.
 pub trait Provider {
@@ -209,6 +230,12 @@ pub trait Provider {
 
     fn login(&self, _address: &str, _password: &str) -> Result<Inbox> {
         Err(unsupported(self.id(), "logging in to an existing address"))
+    }
+
+    /// A push stream for this inbox, for providers that offer one. Polling
+    /// stays the fallback, so a provider without push just returns `None`.
+    fn push(&self, _inbox: &Inbox) -> Option<Box<dyn PushStream>> {
+        None
     }
 
     /// Whether `login` can tell from the address alone that it belongs here.

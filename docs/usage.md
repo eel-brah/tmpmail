@@ -66,7 +66,7 @@ Creates an address, saves it and makes it active. Alias: `generate`. Old flag: `
 |---|---|---|
 | `ADDRESS` | | Full address you want, e.g. `tmpmail new otter42@maxxspace.com`. Same as `-u otter42 -d maxxspace.com`. |
 | `--user NAME` | `-u` | The part before `@`. Random and readable by default (`quietotter482`). Only providers that allow choosing it are used: mail.tm, mail.gw, Guerrilla, Maildrop. |
-| `--domain DOMAIN` | `-d` | The part after `@`. See `tmpmail domains` for choices. |
+| `--domain DOMAIN` | `-d` | The part after `@`. See `tmpmail domains` for choices. tmpmail asks every provider for its domains at once and goes straight to one that has it, so `-d` works without `-p`. |
 | `--provider ID` | `-p` | Use only this provider (no fallback): `mailtm`, `mailgw`, `dropmail`, `guerrilla`, `tempmail_lol`, `maildrop`. |
 | `--label NAME` | `-l` | A nickname for the inbox, used later with `-i NAME`. Example: `-l github`. |
 | `--password PW` | | Password for the mail.tm/mail.gw account, so you can log in later on the mail.tm website. Random by default. Also `TMPMAIL_PASSWORD`. |
@@ -99,6 +99,7 @@ Prints the headers and body as text. Alias: `show`. Old flags: `-r` (newest), `t
 | `--html` | | Open the HTML version in your browser. It is sanitized first: no scripts, forms or frames, links can't track you back. |
 | `--images` | | With `--html`: also load remote images. Off by default because they are often tracking pixels that tell the sender you opened the mail. |
 | `--raw` | | Print the full raw email source (headers + MIME). Useful for debugging or `> mail.eml`. |
+| `--no-pager` | | Print a long message straight to the terminal. By default a message taller than the terminal opens in a pager: `pager` from the config, else `$PAGER`, else `less`. |
 
 ### `wait`: wait for a message
 
@@ -112,7 +113,7 @@ arrives in time it exits with code 2. Built for scripts and CI.
 | `--subject RE` | | Only messages whose subject matches, e.g. `--subject 'verify\|confirm'`. |
 | `--body RE` | | Only messages whose body matches. |
 | `--timeout SECONDS` | `-t` | Give up after this long. Default 180 (or `timeout` in config / `TMPMAIL_TIMEOUT`). |
-| `--interval SECONDS` | | Time between inbox checks. Default 5, minimum 2. |
+| `--interval SECONDS` | | Time between inbox checks. Default 5, minimum 2. With push (see below) checks are rarer, since the provider announces new mail. |
 | `--include-existing` | | Also accept a message that was already in the inbox before you started waiting. |
 | `--otp` | | Print only the verification code, and keep waiting until a message that contains one arrives. |
 | `--otp-regex RE` | | With `--otp`: your own pattern; the first `( )` group is the code. Example: `--otp-regex 'PIN: (\d+)'`. |
@@ -124,6 +125,14 @@ code=$(tmpmail wait --otp --from github -t 120)
 tmpmail wait -a                     # until any of my inboxes gets mail
 tmpmail wait -a --otp -t 600        # a code arriving at any of my inboxes
 ```
+
+**Push.** For mail.tm and DropMail inboxes, `wait` and `watch` also keep a connection open
+over which the provider announces new mail (mail.tm's Mercure server-sent events, DropMail's
+`sessionMailReceived` subscription). New mail then shows up within a second or so, instead of
+at the next check. While the connection is up, the inbox is still checked once a minute in case
+something was missed. If the connection drops, tmpmail goes back to checking every
+`--interval` and reconnects with a growing delay. Turn push off with `push = false` in the
+config or `TMPMAIL_PUSH=0`.
 
 ### `otp`: extract a verification code
 
@@ -161,12 +170,19 @@ there are shown dimmed at start. With `--json` it prints one JSON object per lin
 |---|---|---|
 | `--all-inboxes` | `-a` | Watch **every** saved inbox; each line starts with the address that received it. |
 | `--notify` | `-n` | Also show a desktop notification for each new message. |
-| `--interval SECONDS` | | Time between checks. Default 5. |
+| `--interval SECONDS` | | Time between checks. Default 5. Push applies as in `wait`. |
+| `--rotate PERIOD` | | Switch to a fresh address this often, like `rotate` does: `90s`, `30m`, `2h`, `1h30m` (at least `1m`). The new address is printed (and notified with `-n`), becomes active, and is watched from then on. Can't be combined with `-a`. |
+| `--keep` | | With `--rotate`: keep the old inboxes instead of dropping them. |
+| `--copy` | `-c` | With `--rotate`: copy each new address to the clipboard. |
+
+```sh
+tmpmail watch --rotate 30m -c    # a new address every half hour, copied each time
+```
 
 ### `attachments`: list attachments
 
 Shows each attachment's id, file name, type and size. Takes `ID` or `--recent`/`-r` like `read`.
-Supported by mail.tm, mail.gw and DropMail.
+Supported by mail.tm, mail.gw, DropMail and Guerrilla.
 
 ### `save`: download attachments
 
@@ -266,6 +282,17 @@ by `new`). It also shows what each one supports:
 |---|---|
 | `--check` | Contact each provider now and show `ok` with the response time, or `DOWN` with the reason. |
 
+### `man`: manual pages
+
+```sh
+tmpmail man | man -l -                     # read it now
+tmpmail man -o ~/.local/share/man/man1     # install tmpmail.1 and tmpmail-COMMAND.1
+```
+
+| Option | Short | Explanation |
+|---|---|---|
+| `--output DIR` | `-o` | Write one page per command into this folder instead of printing the main page. |
+
 ### `completions`: shell completion
 
 ```sh
@@ -291,13 +318,13 @@ The same letter can mean different things in different commands.
 | `-d` | `new` | `--domain` |
 | `-p` | `new`, `domains`, `login` | `--provider` |
 | `-l` | `new`, `login` | `--label` |
-| `-c` | `new`, `rotate` | `--copy` |
+| `-c` | `new`, `rotate`, `watch` | `--copy` |
 | `-r` | `read`, `otp`, `links`, `attachments` | `--recent`: newest message |
 | `-t` | `wait`, `otp` | `--timeout` in seconds |
 | `-w` | `otp` | `--wait` |
 | `-m` | `links` | `--match` |
 | `-n` | `watch` | `--notify` |
-| `-o` | `save` | `--output` folder |
+| `-o` | `save`, `man` | `--output` folder |
 
 ## Original tmpmail flags
 
@@ -327,6 +354,8 @@ These still work when used as the **first** argument, so old scripts keep runnin
 | `TMPMAIL_STATE_DIR` | Where inboxes are stored. Default `~/.local/state/tmpmail`. |
 | `TMPMAIL_CONFIG` | Config file path. Default `~/.config/tmpmail/config.toml`. |
 | `TMPMAIL_DROPMAIL_TOKEN` | Your own DropMail API token, if DropMail asks for a captcha. |
+| `TMPMAIL_PUSH` | `0` turns off push in `wait`/`watch` (see [`wait`](#wait-wait-for-a-message)). Default `1`. |
+| `PAGER` | Pager for long messages in `read`, unless `pager` is set in the config. Default `less`. |
 | `TMPMAIL_HTTP_TIMEOUT` | Seconds before a single request to a provider gives up. Default 20. |
 | `NO_COLOR` | Disable colors. |
 

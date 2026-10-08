@@ -15,10 +15,14 @@ pub struct Config {
     pub providers: Option<Vec<String>>,
     pub browser: Option<String>,
     pub clipboard_cmd: Option<String>,
+    /// Pager for long messages (default: $PAGER, else less).
+    pub pager: Option<String>,
     /// Seconds between inbox checks in `wait` and `watch`.
     pub poll_interval: Option<u64>,
     /// Default `wait` timeout in seconds.
     pub timeout: Option<u64>,
+    /// Use providers' push streams in `wait` and `watch` (default true).
+    pub push: Option<bool>,
 }
 
 impl Config {
@@ -52,6 +56,17 @@ impl Config {
         if let Some(t) = env_u64("TMPMAIL_POLL_INTERVAL")? {
             cfg.poll_interval = Some(t);
         }
+        if let Ok(v) = std::env::var("TMPMAIL_PUSH") {
+            cfg.push = Some(match v.to_ascii_lowercase().as_str() {
+                "1" | "true" | "yes" | "on" => true,
+                "0" | "false" | "no" | "off" => false,
+                _ => {
+                    return Err(Error::Usage(format!(
+                        "TMPMAIL_PUSH must be 1 or 0, got {v:?}"
+                    )));
+                }
+            });
+        }
         if let Some(ids) = &cfg.providers {
             for id in ids {
                 provider::get(id)?;
@@ -73,6 +88,10 @@ impl Config {
     /// Seconds between checks: the command-line value, else the config, at least 2.
     pub fn poll_interval(&self, cli: Option<u64>) -> u64 {
         cli.or(self.poll_interval).unwrap_or(5).max(2)
+    }
+
+    pub fn push(&self) -> bool {
+        self.push.unwrap_or(true)
     }
 
     pub fn timeout(&self) -> u64 {

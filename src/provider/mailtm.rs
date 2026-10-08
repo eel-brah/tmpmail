@@ -2,34 +2,45 @@
 //! https://docs.mail.tm — private inboxes behind address+password and a JWT.
 //! Its terms ask clients to credit mail.tm, which the README and `--help` do.
 
+use std::io::{BufRead, BufReader};
+use std::time::Duration;
+
 use serde_json::{Value, json};
 
 use super::{
-    Attachment, Capabilities, CreateOpts, Inbox, Message, Provider, Summary, base_url,
-    domain_unavailable, opt_str, parse_date, random_password, random_user, str_field, with_token,
+    Attachment, Capabilities, CreateOpts, Inbox, Message, Provider, PushEvent, PushStream, Summary,
+    base_url, domain_unavailable, opt_str, parse_date, random_password, random_user, str_field,
+    with_token,
 };
 use crate::error::{Error, Result};
 use crate::http::Http;
 
 const PAGE_SIZE: usize = 30;
 const MAX_PAGES: usize = 5;
+/// The Mercure hub sends a comment line every 30 s; this much silence means
+/// the connection is dead.
+const MERCURE_IDLE: Duration = Duration::from_secs(75);
 
 pub struct MailTm {
     id: &'static str,
     name: &'static str,
     website: &'static str,
     base: String,
+    /// Mercure hub that pushes account events (SSE); mail.gw has none.
+    mercure: Option<String>,
     http: Http,
 }
 
 impl MailTm {
     pub fn tm() -> Self {
-        Self::with_base(
+        let mut tm = Self::with_base(
             "mailtm",
             "mail.tm",
             "https://mail.tm",
             "https://api.mail.tm",
-        )
+        );
+        tm.mercure = Some(base_url("mailtm_mercure", "https://mercure.mail.tm"));
+        tm
     }
 
     pub fn gw() -> Self {
@@ -47,6 +58,7 @@ impl MailTm {
             name,
             website,
             base: base_url(id, base),
+            mercure: None,
             http: Http::new(id),
         }
     }
@@ -318,6 +330,16 @@ impl Provider for MailTm {
         self.delete(inbox, &format!("/messages/{id}"))
     }
 
+    fn push(&self, inbox: &Inbox) -> Option<Box<dyn PushStream>> {
+        let account = inbox.cred_str("account_id").filter(|a| !a.is_empty())?;
+        Some(Box::new(Mercure {
+            url: format!("{}/.well-known/mercure", self.mercure.as_ref()?),
+            topic: format!("/accounts/{account}"),
+            token: inbox.cred_str("token")?.to_string(),
+            http: self.http.clone(),
+        }))
+    }
+
     fn delete_inbox(&self, inbox: &mut Inbox) -> Result<()> {
         if inbox.cred_str("account_id").is_none() {
             // Older state without an id: a token refresh returns it.
@@ -328,6 +350,48 @@ impl Provider for MailTm {
             return Err(self.http.bad("account id unknown"));
         }
         self.delete(inbox, &format!("/accounts/{account}"))
+    }
+}
+
+/// mail.tm's server-sent events: the hub publishes the account's changes
+/// (new mail, quota) to `/accounts/{id}`, readable with the account's JWT.
+struct Mercure {
+    url: String,
+    topic: String,
+    token: String,
+    http: Http,
+}
+
+impl PushStream for Mercure {
+    fn run(self: Box<Self>, event: &mut dyn FnMut(PushEvent) -> bool) -> Result<()> {
+        let resp = self.http.send(|| {
+            self.http
+                .client()
+                .get(&self.url)
+                .query(&[("topic", &self.topic)])
+                .header("Accept", "text/event-stream")
+                .bearer_auth(&self.token)
+                // For a stream this bounds each read, not the whole response.
+                .timeout(MERCURE_IDLE)
+        })?;
+        if !event(PushEvent::Connected) {
+            return Ok(());
+        }
+        for line in BufReader::new(resp).lines() {
+            let line = line.map_err(|e| Error::Unreachable {
+                provider: "mailtm".into(),
+                detail: format!("push stream: {e}"),
+            })?;
+            let kind = if line.starts_with("data:") {
+                PushEvent::Mail
+            } else {
+                PushEvent::Alive
+            };
+            if !event(kind) {
+                return Ok(());
+            }
+        }
+        Ok(())
     }
 }
 
@@ -342,6 +406,7 @@ mod tests {
             name: "mail.tm",
             website: "https://mail.tm",
             base: server.url(),
+            mercure: Some(server.url()),
             http: Http::new("mailtm"),
         }
     }
@@ -435,6 +500,36 @@ mod tests {
         assert_eq!(inbox.cred_str("token"), Some("new"));
         assert_eq!(inbox.cred_str("account_id"), Some("acc9"));
         fresh.assert();
+    }
+
+    #[test]
+    fn mercure_stream_reports_new_mail() {
+        let mut s = Server::new();
+        s.mock("GET", "/.well-known/mercure")
+            .match_query(Matcher::UrlEncoded("topic".into(), "/accounts/acc1".into()))
+            .match_header("authorization", "Bearer jwt1")
+            .with_header("content-type", "text/event-stream")
+            .with_body(":\n\nid: 1\nevent: message\ndata: {\"@type\":\"Message\"}\n\n")
+            .create();
+        let inbox = Inbox::new(
+            "mailtm",
+            "x@maxxspace.com".into(),
+            json!({"token":"jwt1","account_id":"acc1"}),
+        );
+        let stream = provider(&s).push(&inbox).expect("mail.tm has push");
+        let mut events = Vec::new();
+        stream
+            .run(&mut |e| {
+                events.push(e);
+                true
+            })
+            .unwrap();
+        assert_eq!(events[0], PushEvent::Connected);
+        assert_eq!(events.iter().filter(|e| **e == PushEvent::Mail).count(), 1);
+
+        // Without an account id there is no topic to follow.
+        let bare = Inbox::new("mailtm", "x@maxxspace.com".into(), json!({"token":"jwt1"}));
+        assert!(provider(&s).push(&bare).is_none());
     }
 
     #[test]

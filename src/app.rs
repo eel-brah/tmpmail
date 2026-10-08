@@ -1,6 +1,5 @@
 use std::collections::{HashMap, HashSet};
 use std::io::{IsTerminal, Write};
-use std::thread::sleep;
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
@@ -13,6 +12,7 @@ use crate::config::Config;
 use crate::error::{Error, Result};
 use crate::extract;
 use crate::provider::{self, Capabilities, CreateOpts, Inbox, Message, Provider, Summary};
+use crate::push::Poller;
 use crate::render::{body_text, clean, clean_line, safe_filename, safe_html_document};
 use crate::store::{State, Store};
 use crate::system;
@@ -101,26 +101,44 @@ impl App {
             Command::Drop(a) => self.drop_inbox(a),
             Command::Rotate(a) => self.rotate(a),
             Command::Providers(a) => self.providers(a),
-            Command::Completions { .. } => unreachable!("handled in main"),
+            Command::Completions { .. } | Command::Man { .. } => unreachable!("handled in main"),
         }
     }
 
     // ---------- output helpers ----------
 
-    fn bold(&self, s: &str) -> String {
-        if self.color {
-            format!("\x1b[1m{s}\x1b[0m")
+    /// Wraps `s` in an SGR color code when colors are on. Pad before
+    /// painting: the escape codes would count toward the width.
+    fn paint(&self, code: &str, s: &str) -> String {
+        if self.color && !s.trim().is_empty() {
+            format!("\x1b[{code}m{s}\x1b[0m")
         } else {
             s.to_string()
         }
     }
 
+    fn bold(&self, s: &str) -> String {
+        self.paint("1", s)
+    }
+
     fn dim(&self, s: &str) -> String {
-        if self.color {
-            format!("\x1b[2m{s}\x1b[0m")
-        } else {
-            s.to_string()
-        }
+        self.paint("2", s)
+    }
+
+    fn green(&self, s: &str) -> String {
+        self.paint("32", s)
+    }
+
+    fn red(&self, s: &str) -> String {
+        self.paint("31", s)
+    }
+
+    fn yellow(&self, s: &str) -> String {
+        self.paint("33", s)
+    }
+
+    fn cyan(&self, s: &str) -> String {
+        self.paint("36", s)
     }
 
     fn json_out(&self, v: &impl Serialize) {
@@ -346,11 +364,14 @@ impl App {
             }
             candidates.push(p);
         }
+        let (mut failures, mut unavailable) = (Vec::new(), Vec::new());
+        if let Some(domain) = &opts.domain {
+            candidates = order_by_domain(candidates, domain, &mut unavailable);
+        }
         // A password (maybe just TMPMAIL_PASSWORD in the environment) only
         // matters to providers with accounts: try those first, not only those.
         candidates.sort_by_key(|p| opts.password.is_some() && !p.caps().login);
 
-        let (mut failures, mut unavailable) = (Vec::new(), Vec::new());
         for p in candidates {
             match p.create(opts) {
                 Ok(inbox) => {
@@ -495,17 +516,22 @@ impl App {
     fn print_list(&self, list: &[Summary]) {
         let width = term_width();
         for (n, s) in list.iter().enumerate() {
-            let marker = if s.seen { ' ' } else { '*' };
             let att = if s.has_attachments { " [att]" } else { "" };
             let when = s.date.map(relative).unwrap_or_default();
             let from = truncate(&clean_line(&s.from), 28);
             let room = width.saturating_sub(4 + 10 + 30 + att.len()).max(20);
             let subject = truncate(&clean_line(&s.subject), room);
+            // Unread mail stands out; read mail is plain.
+            let (marker, subject) = if s.seen {
+                (" ".to_string(), subject)
+            } else {
+                (self.cyan("*"), self.bold(&subject))
+            };
             println!(
-                "{:>3}{marker} {}  {from:<28}  {}{att}",
+                "{:>3}{marker} {}  {from:<28}  {subject}{}",
                 n + 1,
                 self.dim(&format!("{when:>8}")),
-                self.bold(&subject),
+                self.yellow(att),
             );
         }
     }
@@ -528,7 +554,21 @@ impl App {
         if a.html {
             return self.open_html(&msg, a.images);
         }
-        self.print_message(&msg);
+        if self.global.json {
+            self.json_out(&msg);
+            return Ok(());
+        }
+        let text = self.render_message(&msg);
+        let rows = system::term_size().map_or(0, |(_, rows)| rows);
+        // Leave a row for the shell prompt.
+        let fits = rows == 0 || text.lines().count() < rows;
+        if a.no_pager || fits || !std::io::stdout().is_terminal() {
+            print!("{text}");
+        } else if let Err(e) = system::page(&text, self.config.pager.as_deref()) {
+            self.warn(&format!("pager failed ({e:#}), printing instead"));
+            print!("{text}");
+        }
+        self.note_html_version(&msg);
         Ok(())
     }
 
@@ -537,33 +577,51 @@ impl App {
             self.json_out(msg);
             return;
         }
+        print!("{}", self.render_message(msg));
+        self.note_html_version(msg);
+    }
+
+    fn note_html_version(&self, msg: &Message) {
+        if msg.html.is_some() && !self.global.quiet {
+            // The note goes to stderr; keep it after the body when piped.
+            let _ = std::io::stdout().flush();
+            self.note(&format!("\n(HTML version: tmpmail read {} --html)", msg.id));
+        }
+    }
+
+    /// Headers and text body, ready to print or page.
+    fn render_message(&self, msg: &Message) -> String {
         let width = term_width().min(100);
-        let header =
-            |k: &str, v: &str| println!("{} {}", self.bold(&format!("{k:<8}")), clean_line(v));
-        header("From:", &msg.from);
-        header("To:", &msg.to.join(", "));
-        header("Subject:", &msg.subject);
+        let mut out = String::new();
+        let mut header = |k: &str, v: String| {
+            out.push_str(&format!("{} {v}\n", self.bold(&format!("{k:<8}"))));
+        };
+        header("From:", clean_line(&msg.from));
+        header("To:", clean_line(&msg.to.join(", ")));
+        header("Subject:", self.bold(&clean_line(&msg.subject)));
         if let Some(d) = msg.date {
+            let local = d.with_timezone(&chrono::Local);
             header(
                 "Date:",
-                &d.with_timezone(&chrono::Local)
-                    .format("%Y-%m-%d %H:%M:%S")
-                    .to_string(),
+                format!("{} ({})", local.format("%Y-%m-%d %H:%M:%S"), relative(d)),
             );
         }
         if !msg.attachments.is_empty() {
             let names: Vec<String> = msg.attachments.iter().map(|a| a.filename.clone()).collect();
             header(
                 "Attach:",
-                &format!("{} (tmpmail save {})", names.join(", "), msg.id),
+                format!(
+                    "{} {}",
+                    self.yellow(&clean_line(&names.join(", "))),
+                    self.dim(&format!("(tmpmail save {})", clean_line(&msg.id)))
+                ),
             );
         }
-        println!();
+        out.push('\n');
         let body = body_text(msg.text.as_deref(), msg.html.as_deref(), width);
-        println!("{}", clean(body.trim_end()));
-        if msg.html.is_some() && !self.global.quiet {
-            self.note(&format!("\n(HTML version: tmpmail read {} --html)", msg.id));
-        }
+        out.push_str(&clean(body.trim_end()));
+        out.push('\n');
+        out
     }
 
     fn open_html(&self, msg: &Message, images: bool) -> Result<()> {
@@ -683,9 +741,13 @@ impl App {
         ));
 
         let mut failing: HashSet<usize> = HashSet::new();
+        let mut poller = Poller::new(Duration::from_secs(interval), self.config.push());
         loop {
             for n in targets.clone() {
-                let Some(list) = self.poll(n, &mut targets, &mut failing, all)? else {
+                if !poller.is_due(&self.state.inboxes[n].address) {
+                    continue;
+                }
+                let Some(list) = self.poll(n, &mut targets, &mut failing, all, &mut poller)? else {
                     continue;
                 };
                 // Oldest first, so the first matching arrival wins.
@@ -721,29 +783,32 @@ impl App {
             if targets.is_empty() {
                 return Err(Error::NotFound("all inboxes have expired".into()));
             }
-            let now = Instant::now();
-            if now >= deadline {
-                return Err(Error::Timeout(timeout));
-            }
-            let jitter = Duration::from_millis(rand::random_range(0..1000));
-            sleep((Duration::from_secs(interval) + jitter).min(deadline - now));
             if Instant::now() >= deadline {
                 return Err(Error::Timeout(timeout));
             }
+            poller.sleep(Some(deadline));
         }
     }
 
-    /// Lists inbox `n` for a polling loop. A temporary provider failure is
-    /// warned about once and yields `None`; in multi-inbox mode other errors
-    /// go through `skip_or_warn`.
+    /// Lists inbox `n` for a polling loop and (re)starts its push stream. A
+    /// temporary provider failure is warned about once and yields `None`; in
+    /// multi-inbox mode other errors go through `skip_or_warn`.
     fn poll(
         &mut self,
         n: usize,
         targets: &mut Vec<usize>,
         failing: &mut HashSet<usize>,
         multi: bool,
+        poller: &mut Poller,
     ) -> Result<Option<Vec<Summary>>> {
-        match self.with_inbox_at(n, |p, inbox| Self::sorted_list(p, inbox)) {
+        let address = self.state.inboxes[n].address.clone();
+        let result = self.with_inbox_at(n, |p, inbox| {
+            let list = Self::sorted_list(p, inbox)?;
+            poller.subscribe(p, inbox);
+            Ok(list)
+        });
+        poller.polled(&address, result.is_ok());
+        match result {
             Ok(list) => {
                 if failing.remove(&n) {
                     self.note(&format!(
@@ -848,13 +913,36 @@ impl App {
         let mut seen: HashSet<(usize, String)> = HashSet::new();
         let mut first = true;
         let mut failing: HashSet<usize> = HashSet::new();
+        let mut poller = Poller::new(Duration::from_secs(interval), self.config.push());
+        let mut rotate_at = a.rotate.map(|every| Instant::now() + every);
         self.note(&format!(
             "watching {}, Ctrl+C to stop",
             self.targets_label(&targets)
         ));
         loop {
+            if let (Some(at), Some(every)) = (rotate_at, a.rotate) {
+                if Instant::now() >= at {
+                    rotate_at = Some(match self.watch_rotate(&a, &mut poller) {
+                        Ok(n) => {
+                            targets = vec![n];
+                            // Indexes moved; the new inbox has nothing seen.
+                            seen.clear();
+                            failing.clear();
+                            Instant::now() + every
+                        }
+                        Err(e) => {
+                            self.warn(&format!("could not rotate ({e}); retrying in a minute"));
+                            Instant::now() + Duration::from_secs(60)
+                        }
+                    });
+                }
+            }
             for n in targets.clone() {
-                let Some(list) = self.poll(n, &mut targets, &mut failing, multi)? else {
+                if !poller.is_due(&self.state.inboxes[n].address) {
+                    continue;
+                }
+                let Some(list) = self.poll(n, &mut targets, &mut failing, multi, &mut poller)?
+                else {
                     continue;
                 };
                 let address = clean_line(&self.state.inboxes[n].address);
@@ -894,8 +982,40 @@ impl App {
             if targets.is_empty() {
                 return Err(Error::NotFound("all inboxes have expired".into()));
             }
-            sleep(Duration::from_secs(interval));
+            poller.sleep(rotate_at);
         }
+    }
+
+    /// `watch --rotate`: replaces the watched inbox with a fresh one, makes
+    /// it active and announces it. Returns the new inbox's index.
+    fn watch_rotate(&mut self, a: &WatchArgs, poller: &mut Poller) -> Result<usize> {
+        let old = self.current()?.address.clone();
+        let inbox = self.replace_current(a.keep)?;
+        let added = inbox.clone();
+        self.state = self.store.update(|s| s.add(added))?.0;
+        // `-i` named the old inbox; from now on follow the active one.
+        self.global.inbox = None;
+        poller.forget(&old);
+        let address = clean_line(&inbox.address);
+        if a.copy {
+            if let Err(e) = system::copy(&inbox.address, self.clipboard_cmd().as_deref()) {
+                self.warn(&format!("could not copy the new address: {e:#}"));
+            }
+        }
+        if self.global.json {
+            println!(
+                "{}",
+                json!({ "rotated": { "from": old, "to": inbox.address } })
+            );
+        } else {
+            println!("{} {}", self.green("new address:"), self.bold(&address));
+        }
+        if a.notify {
+            system::notify("tmpmail: new address", &address);
+        }
+        self.state
+            .position(&inbox.address)
+            .ok_or_else(|| Error::NotFound(format!("{address} vanished from the state file")))
     }
 
     // ----- attachments -----
@@ -909,14 +1029,25 @@ impl App {
         if msg.attachments.is_empty() {
             println!("No attachments.");
         }
-        for att in &msg.attachments {
-            let size = att.size.map(human_size).unwrap_or_default();
+        let rows: Vec<[String; 4]> = msg
+            .attachments
+            .iter()
+            .map(|att| {
+                [
+                    clean_line(&att.id),
+                    clean_line(&att.filename),
+                    clean_line(&att.content_type),
+                    att.size.map(human_size).unwrap_or_default(),
+                ]
+            })
+            .collect();
+        let [iw, fw, tw, sw] = column_widths(&rows);
+        for [id, file, kind, size] in &rows {
             println!(
-                "{}  {}  {}  {}",
-                clean_line(&att.id),
-                clean_line(&att.filename),
-                self.dim(&clean_line(&att.content_type)),
-                size
+                "{}  {}  {}  {size:>sw$}",
+                self.dim(&pad(id, iw)),
+                pad(file, fw),
+                self.dim(&pad(kind, tw)),
             );
         }
         Ok(())
@@ -1050,25 +1181,44 @@ impl App {
         if self.state.inboxes.is_empty() {
             println!("No inboxes. Create one with `tmpmail new`.");
         }
-        for i in &self.state.inboxes {
+        let rows: Vec<[String; 3]> = self
+            .state
+            .inboxes
+            .iter()
+            .map(|i| {
+                [
+                    clean_line(&i.address),
+                    i.label
+                        .as_deref()
+                        .map(|l| format!("[{}]", clean_line(l)))
+                        .unwrap_or_default(),
+                    i.provider.clone(),
+                ]
+            })
+            .collect();
+        let [aw, lw, pw] = column_widths(&rows);
+        for (i, [address, label, provider]) in self.state.inboxes.iter().zip(&rows) {
             let v = self.view(i);
-            let mark = if v.active { "*" } else { " " };
-            let label = i
-                .label
-                .as_deref()
-                .map(|l| format!(" [{l}]"))
-                .unwrap_or_default();
+            let mark = if v.active {
+                self.green("*")
+            } else {
+                " ".into()
+            };
             let status = match i.expires_at {
-                _ if v.expired => "expired".to_string(),
-                Some(t) => format!("expires {}", relative(t)),
+                _ if v.expired => self.red("expired"),
+                Some(t) if t - Utc::now() < chrono::Duration::minutes(10) => {
+                    self.yellow(&format!("expires {}", relative(t)))
+                }
+                Some(t) => self.dim(&format!("expires {}", relative(t))),
                 None => String::new(),
             };
-            println!(
-                "{mark} {}{label}  {}  {}",
-                self.bold(&clean_line(&i.address)),
-                self.dim(&i.provider),
-                self.dim(&status)
+            let line = format!(
+                "{mark} {}  {}  {}  {status}",
+                self.bold(&pad(address, aw)),
+                self.cyan(&pad(label, lw)),
+                self.dim(&pad(provider, pw)),
             );
+            println!("{}", line.trim_end());
         }
         Ok(())
     }
@@ -1133,6 +1283,14 @@ impl App {
     }
 
     fn rotate(&mut self, a: RotateArgs) -> Result<()> {
+        let inbox = self.replace_current(a.keep)?;
+        self.activate(&inbox, a.copy)
+    }
+
+    /// Creates a fresh inbox to replace the selected one, with the same
+    /// provider if it works, and drops the old one unless `keep`. The caller
+    /// stores the new inbox.
+    fn replace_current(&mut self, keep: bool) -> Result<Inbox> {
         let old = self.current()?.clone();
         // Prefer the same provider, fall back like `new` does.
         let opts = CreateOpts::default();
@@ -1146,11 +1304,11 @@ impl App {
             Err(e) => return Err(e),
         };
         inbox.label = old.label.clone();
-        if !a.keep {
+        if !keep {
             let _ = p.delete_inbox(&mut old.clone());
             self.forget(&old.address)?;
         }
-        self.activate(&inbox, a.copy)
+        Ok(inbox)
     }
 
     /// Removes a stored inbox (by exact address) from the state file.
@@ -1215,22 +1373,64 @@ impl App {
             .collect();
             let status = match &r.status {
                 None => String::new(),
-                Some(Health { ms: Some(ms), .. }) => format!("  ok {ms}ms"),
+                Some(Health { ms: Some(ms), .. }) => {
+                    format!("  {}", self.green(&format!("ok {ms}ms")))
+                }
                 Some(h) => format!(
-                    "  DOWN: {}",
+                    "  {} {}",
+                    self.red("DOWN:"),
                     clean_line(h.error.as_deref().unwrap_or_default())
                 ),
+            };
+            let about = if flags.is_empty() {
+                caps.lifetime.to_string()
+            } else {
+                format!("{} | {}", flags.join(","), caps.lifetime)
             };
             println!(
                 "{order:>3} {:<13} {:<15} {}{}",
                 r.id,
                 r.name,
-                self.dim(&format!("{} | {}", flags.join(","), caps.lifetime)),
+                self.dim(&about),
                 status
             );
         }
         Ok(())
     }
+}
+
+/// Asks every candidate for its domains at once and keeps those offering
+/// `domain` first, then those that couldn't answer (they may be down). The
+/// rest are left out and noted in `unavailable`, so `new -d` doesn't try each
+/// provider in turn.
+fn order_by_domain(
+    candidates: Vec<Box<dyn Provider>>,
+    domain: &str,
+    unavailable: &mut Vec<String>,
+) -> Vec<Box<dyn Provider>> {
+    let lists: Vec<Result<Vec<String>>> = std::thread::scope(|s| {
+        let lookups: Vec<_> = candidates
+            .iter()
+            .map(|p| {
+                let id = p.id();
+                s.spawn(move || provider::get(id)?.domains())
+            })
+            .collect();
+        lookups
+            .into_iter()
+            .map(|l| l.join().expect("domain lookup panicked"))
+            .collect()
+    });
+    let (mut offering, mut unknown) = (Vec::new(), Vec::new());
+    for (p, list) in candidates.into_iter().zip(lists) {
+        match list {
+            Ok(l) if l.iter().any(|d| d == domain) => offering.push(p),
+            Ok(l) => unavailable.push(provider::domain_unavailable(p.id(), domain, &l).to_string()),
+            Err(_) => unknown.push(p),
+        }
+    }
+    offering.extend(unknown);
+    offering
 }
 
 fn check_health(id: &str) -> Health {
@@ -1302,10 +1502,22 @@ fn summary_line(s: &Summary) -> String {
 }
 
 fn term_width() -> usize {
-    std::env::var("COLUMNS")
-        .ok()
-        .and_then(|c| c.parse().ok())
-        .unwrap_or(100)
+    system::term_size().map_or(100, |(cols, _)| cols)
+}
+
+/// Widest cell of each column, in characters.
+fn column_widths<const N: usize>(rows: &[[String; N]]) -> [usize; N] {
+    let mut widths = [0; N];
+    for row in rows {
+        for (w, cell) in widths.iter_mut().zip(row) {
+            *w = (*w).max(cell.chars().count());
+        }
+    }
+    widths
+}
+
+fn pad(s: &str, width: usize) -> String {
+    format!("{s:<width$}")
 }
 
 fn truncate(s: &str, max: usize) -> String {
@@ -1410,5 +1622,15 @@ mod tests {
         assert_eq!(truncate("abcdef", 4), "abc…");
         assert_eq!(truncate("abc", 4), "abc");
         assert_eq!(human_size(2048), "2.0 KB");
+    }
+
+    #[test]
+    fn columns_fit_the_widest_cell() {
+        let rows = [
+            ["a@x.com".to_string(), String::new()],
+            ["long@example.org".to_string(), "[github]".to_string()],
+        ];
+        assert_eq!(column_widths(&rows), [16, 8]);
+        assert_eq!(pad("ab", 4), "ab  ");
     }
 }
