@@ -69,11 +69,26 @@ tmpmail --json ls | jq '.messages[0].subject'
 | `login ADDR --password PW` | Attach an existing mail.tm / mail.gw account |
 | `rotate [--keep]` | Replace the active address with a fresh one |
 | `domains [-p PROVIDER]`, `providers [--check]` | Domains, provider capabilities and live status |
+| `tui` | Full-screen browser: inboxes, mail and preview, updated live |
+| `mcp` | MCP server on stdio so AI agents can create inboxes and wait for codes |
 | `completions bash\|zsh\|fish`, `man [-o DIR]` | Shell completions, man pages |
 
 Messages can be referenced by full id, by their number in `tmpmail ls`, or by a unique id prefix.
 
 **Every option and short flag (`-l`, `-g`, `-u`, `-t`...) is explained in [docs/usage.md](docs/usage.md).**
+
+## AI agents (MCP)
+
+`tmpmail mcp` is a [Model Context Protocol](https://modelcontextprotocol.io) server, so an
+agent can sign up for things on its own:
+
+```sh
+claude mcp add tmpmail -- tmpmail mcp
+```
+
+Tools: `create_inbox`, `list_inboxes`, `list_messages`, `read_message`, `wait_for_message`,
+`get_verification_code`, `get_links`, `delete_message`, `delete_inbox`. Details in
+[docs/usage.md](docs/usage.md#mcp-server-for-ai-agents).
 
 ## Providers
 
@@ -125,6 +140,8 @@ Environment: `TMPMAIL_PROVIDER` (comma list), `TMPMAIL_TIMEOUT`, `TMPMAIL_POLL_I
   deleted after a day.
 - Attachment names are sanitized so they can't escape the target directory, and
   existing files are never overwritten.
+- `tmpmail mcp` hands message contents to an AI agent. Anyone can mail a temp address, so
+  treat what the agent reads there as untrusted input.
 - No telemetry. The only network traffic is to the provider you use.
 
 ## Development
@@ -138,4 +155,4 @@ cargo clippy --all-targets
 
 ## License
 
-MIT
+GPL-3.0-or-later. See [LICENSE](LICENSE).

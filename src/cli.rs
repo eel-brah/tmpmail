@@ -25,7 +25,7 @@ pub struct Cli {
     pub command: Command,
 }
 
-#[derive(Debug, Args)]
+#[derive(Debug, Clone, Args)]
 pub struct Global {
     /// Machine-readable JSON output
     #[arg(long, global = true)]
@@ -119,6 +119,12 @@ pub enum Command {
 
     /// List providers, their capabilities and (with --check) their status
     Providers(ProvidersArgs),
+
+    /// Browse inboxes and mail in a full-screen terminal UI
+    Tui,
+
+    /// Run an MCP server on stdin/stdout for AI agents
+    Mcp,
 
     /// Print shell completions
     Completions { shell: Shell },

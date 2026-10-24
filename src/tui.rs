@@ -1,0 +1,1219 @@
+//! `tmpmail tui`: inboxes on the left, their mail and a preview on the
+//! right, updated live. Network calls run on a worker thread with its own
+//! `App`, so the screen never waits on a provider; the worker lists every
+//! inbox on the same schedule as `watch` (push where the provider has it).
+
+use std::collections::{HashMap, HashSet};
+use std::sync::mpsc::{Receiver, Sender, channel};
+use std::time::{Duration, Instant};
+
+use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::style::{Color, Modifier, Style, Stylize};
+use ratatui::text::{Line, Span, Text};
+use ratatui::widgets::{Block, Clear, List, ListItem, ListState, Paragraph, Wrap};
+use ratatui::{DefaultTerminal, Frame};
+
+use crate::app::{App, message_body, message_links, relative};
+use crate::cli::Global;
+use crate::error::Result;
+use crate::extract;
+use crate::provider::{CreateOpts, Inbox, Message, Summary};
+use crate::push::Poller;
+use crate::render::{body_text, clean, clean_line};
+use crate::system;
+
+/// How often the worker re-reads the state file for inboxes another
+/// tmpmail added or dropped.
+const STATE_RELOAD: Duration = Duration::from_secs(5);
+/// How long a status message stays in the footer.
+const STATUS_TTL: Duration = Duration::from_secs(6);
+
+pub fn run(app: &mut App) -> Result<()> {
+    let (req_tx, req_rx) = channel();
+    let (ev_tx, ev_rx) = channel();
+    let (log_tx, log_rx) = channel();
+    app.log_to(log_tx.clone());
+    let global = app.global.clone();
+    // Detached: a provider call can block for many seconds, and quitting
+    // must not wait for it. The process exits with the UI.
+    std::thread::spawn(move || {
+        if let Err(e) = worker(global, req_rx, ev_tx.clone(), log_tx) {
+            let _ = ev_tx.send(Ev::Fatal(e.to_string()));
+        }
+    });
+
+    let mut terminal = ratatui::try_init().map_err(anyhow::Error::from)?;
+    let mut ui = Ui::new(req_tx);
+    let result = ui.run(&mut terminal, app, &ev_rx, &log_rx);
+    ratatui::restore();
+    result
+}
+
+// ---------- worker ----------
+
+enum Req {
+    Refresh(String),
+    Open { address: String, id: String },
+    Create,
+    Use(String),
+    DeleteMessage { address: String, id: String },
+    Drop(String),
+}
+
+enum Ev {
+    Inboxes {
+        inboxes: Vec<Inbox>,
+        active: Option<String>,
+    },
+    Created(String),
+    Listed {
+        address: String,
+        result: std::result::Result<Vec<Summary>, String>,
+        live: bool,
+    },
+    Opened {
+        address: String,
+        result: std::result::Result<Box<Message>, String>,
+    },
+    Deleted {
+        address: String,
+        id: String,
+    },
+    Fatal(String),
+}
+
+fn worker(global: Global, rx: Receiver<Req>, tx: Sender<Ev>, log: Sender<String>) -> Result<()> {
+    let mut app = App::new(global)?;
+    app.log_to(log.clone());
+    let interval = Duration::from_secs(app.config.poll_interval(None));
+    let mut poller = Poller::new(interval, app.config.push());
+    let send_inboxes = |app: &App| {
+        tx.send(Ev::Inboxes {
+            inboxes: app.state.inboxes.clone(),
+            active: app.state.active.clone(),
+        })
+    };
+    let mut reloaded = Instant::now();
+    if send_inboxes(&app).is_err() {
+        return Ok(());
+    }
+    loop {
+        // Requests from the screen, in order; of several opens only the
+        // last matters (the cursor moved on).
+        let mut reqs: Vec<Req> = rx.try_iter().collect();
+        if let Some(last) = reqs.iter().rposition(|r| matches!(r, Req::Open { .. })) {
+            let mut k = 0;
+            reqs.retain(|r| {
+                k += 1;
+                !matches!(r, Req::Open { .. }) || k - 1 == last
+            });
+        }
+        for req in reqs {
+            let changed = handle(&mut app, &mut poller, req, &tx, &log);
+            if changed {
+                let _ = send_inboxes(&app);
+            }
+        }
+
+        if reloaded.elapsed() >= STATE_RELOAD {
+            reloaded = Instant::now();
+            if let Ok(state) = app.store.load() {
+                let addresses = |s: &crate::store::State| -> Vec<(String, Option<String>)> {
+                    s.inboxes
+                        .iter()
+                        .map(|i| (i.address.clone(), i.label.clone()))
+                        .collect()
+                };
+                let changed =
+                    addresses(&state) != addresses(&app.state) || state.active != app.state.active;
+                app.state = state;
+                if changed && send_inboxes(&app).is_err() {
+                    return Ok(());
+                }
+            }
+        }
+
+        for n in 0..app.state.inboxes.len() {
+            let address = app.state.inboxes[n].address.clone();
+            if app.state.inboxes[n].is_expired() || !poller.is_due(&address) {
+                continue;
+            }
+            let result = app.with_inbox_at(n, |p, inbox| {
+                let list = App::sorted_list(p, inbox)?;
+                poller.subscribe(p, inbox);
+                Ok(list)
+            });
+            poller.polled(&address, result.is_ok());
+            let ev = Ev::Listed {
+                live: poller.is_live(&address),
+                address,
+                result: result.map_err(|e| e.to_string()),
+            };
+            if tx.send(ev).is_err() {
+                return Ok(()); // the screen is gone
+            }
+        }
+        // Short naps so requests from the screen are picked up quickly.
+        poller.sleep(Some(Instant::now() + Duration::from_millis(100)));
+    }
+}
+
+/// Carries out one request. Returns whether the inbox list changed.
+fn handle(
+    app: &mut App,
+    poller: &mut Poller,
+    req: Req,
+    tx: &Sender<Ev>,
+    log: &Sender<String>,
+) -> bool {
+    let fail = |what: &str, e: crate::error::Error| {
+        let _ = log.send(format!("{what}: {e}"));
+    };
+    match req {
+        Req::Refresh(address) => {
+            poller.forget(&address); // makes it due now; the stream restarts
+            false
+        }
+        Req::Open { address, id } => {
+            let Some(n) = app.state.position(&address) else {
+                return false;
+            };
+            let result = app
+                .with_inbox_at(n, |p, inbox| p.get(inbox, &id))
+                .map(Box::new)
+                .map_err(|e| e.to_string());
+            let _ = tx.send(Ev::Opened { address, result });
+            false
+        }
+        Req::Create => {
+            match app.create_with_fallback(None, None, &CreateOpts::default()) {
+                Ok(inbox) => {
+                    let address = inbox.address.clone();
+                    match app.store.update(|s| s.add(inbox)) {
+                        Ok((state, ())) => {
+                            app.state = state;
+                            let _ = tx.send(Ev::Created(address));
+                        }
+                        Err(e) => fail("could not save the new inbox", e),
+                    }
+                }
+                Err(e) => fail("could not create an inbox", e),
+            }
+            true
+        }
+        Req::Use(address) => {
+            match app.store.update(|s| s.active = Some(address)) {
+                Ok((state, ())) => app.state = state,
+                Err(e) => fail("could not switch inbox", e),
+            }
+            true
+        }
+        Req::DeleteMessage { address, id } => {
+            if let Some(n) = app.state.position(&address) {
+                match app.with_inbox_at(n, |p, inbox| p.delete_message(inbox, &id)) {
+                    Ok(()) => {
+                        let _ = tx.send(Ev::Deleted {
+                            address: address.clone(),
+                            id,
+                        });
+                        poller.forget(&address);
+                    }
+                    Err(e) => fail("could not delete the message", e),
+                }
+            }
+            false
+        }
+        Req::Drop(address) => {
+            if let Some(n) = app.state.position(&address) {
+                let mut inbox = app.state.inboxes[n].clone();
+                if let Ok(p) = crate::provider::get(&inbox.provider) {
+                    if let Err(e) = p.delete_inbox(&mut inbox) {
+                        fail(
+                            "could not delete it at the provider, forgetting it locally",
+                            e,
+                        );
+                    }
+                }
+                if let Err(e) = app.forget(&address) {
+                    fail("could not forget the inbox", e);
+                }
+                poller.forget(&address);
+            }
+            true
+        }
+    }
+}
+
+// ---------- screen ----------
+
+#[derive(Clone, Copy, PartialEq)]
+enum Focus {
+    Inboxes,
+    Messages,
+    Preview,
+}
+
+/// What we know about one inbox's mail.
+#[derive(Default)]
+struct Mail {
+    messages: Vec<Summary>,
+    loaded: bool,
+    error: Option<String>,
+    live: bool,
+    checked: Option<Instant>,
+}
+
+enum Confirm {
+    DeleteMessage { address: String, id: String },
+    Drop(String),
+}
+
+enum Preview {
+    None,
+    Loading,
+    Failed(String),
+    Ready(Box<Message>),
+}
+
+struct Ui {
+    req: Sender<Req>,
+    inboxes: Vec<Inbox>,
+    active: Option<String>,
+    inbox_state: ListState,
+    msg_state: ListState,
+    mail: HashMap<String, Mail>,
+    /// Messages that arrived while the TUI was open, shown as new.
+    fresh: HashSet<(String, String)>,
+    /// Fetched messages, by (address, id).
+    cache: HashMap<(String, String), Box<Message>>,
+    /// The message the preview shows, and its state.
+    shown: Option<(String, String)>,
+    preview: Preview,
+    /// The preview's text for (message id, width), since converting HTML
+    /// on every frame would be wasteful.
+    rendered: Option<(String, u16, Text<'static>)>,
+    scroll: u16,
+    focus: Focus,
+    status: Option<(String, Instant)>,
+    confirm: Option<Confirm>,
+    help: bool,
+    /// Select this inbox once the worker reports it (after `n`).
+    pending_select: Option<String>,
+    quit: bool,
+}
+
+impl Ui {
+    fn new(req: Sender<Req>) -> Self {
+        Ui {
+            req,
+            inboxes: Vec::new(),
+            active: None,
+            inbox_state: ListState::default(),
+            msg_state: ListState::default(),
+            mail: HashMap::new(),
+            fresh: HashSet::new(),
+            cache: HashMap::new(),
+            shown: None,
+            preview: Preview::None,
+            rendered: None,
+            scroll: 0,
+            focus: Focus::Inboxes,
+            status: None,
+            confirm: None,
+            help: false,
+            pending_select: None,
+            quit: false,
+        }
+    }
+
+    fn run(
+        &mut self,
+        terminal: &mut DefaultTerminal,
+        app: &mut App,
+        events: &Receiver<Ev>,
+        logs: &Receiver<String>,
+    ) -> Result<()> {
+        while !self.quit {
+            terminal
+                .draw(|f| self.draw(f))
+                .map_err(anyhow::Error::from)?;
+            if event::poll(Duration::from_millis(150)).map_err(anyhow::Error::from)? {
+                if let Event::Key(key) = event::read().map_err(anyhow::Error::from)? {
+                    if key.kind == KeyEventKind::Press {
+                        self.key(key, app);
+                    }
+                }
+            }
+            for ev in events.try_iter() {
+                if let Ev::Fatal(e) = ev {
+                    return Err(anyhow::anyhow!(e).into());
+                }
+                self.event(ev);
+            }
+            for msg in logs.try_iter() {
+                self.say(msg);
+            }
+        }
+        Ok(())
+    }
+
+    fn say(&mut self, msg: impl Into<String>) {
+        self.status = Some((msg.into(), Instant::now()));
+    }
+
+    fn send(&self, req: Req) {
+        let _ = self.req.send(req);
+    }
+
+    fn inbox(&self) -> Option<&Inbox> {
+        self.inbox_state
+            .selected()
+            .and_then(|n| self.inboxes.get(n))
+    }
+
+    fn address(&self) -> Option<String> {
+        self.inbox().map(|i| i.address.clone())
+    }
+
+    fn messages(&self) -> &[Summary] {
+        self.inbox()
+            .and_then(|i| self.mail.get(&i.address))
+            .map_or(&[], |m| m.messages.as_slice())
+    }
+
+    fn summary(&self) -> Option<&Summary> {
+        self.msg_state
+            .selected()
+            .and_then(|n| self.messages().get(n))
+    }
+
+    fn message(&self) -> Option<&Message> {
+        match &self.preview {
+            Preview::Ready(m) => Some(m),
+            _ => None,
+        }
+    }
+
+    // ----- worker events -----
+
+    fn event(&mut self, ev: Ev) {
+        match ev {
+            Ev::Inboxes { inboxes, active } => {
+                let selected = self.address();
+                self.inboxes = inboxes;
+                self.active = active;
+                let want = self
+                    .pending_select
+                    .clone()
+                    .or(selected)
+                    .or_else(|| self.active.clone());
+                let n = want
+                    .and_then(|a| self.inboxes.iter().position(|i| i.address == a))
+                    .or((!self.inboxes.is_empty()).then_some(0));
+                if n != self.inbox_state.selected() || self.inbox().is_none() {
+                    self.select_inbox(n);
+                }
+                if let Some(a) = &self.pending_select {
+                    if self.inboxes.iter().any(|i| &i.address == a) {
+                        self.pending_select = None;
+                    }
+                }
+            }
+            Ev::Created(address) => {
+                self.say(format!("created {address}, c copies it"));
+                self.pending_select = Some(address);
+            }
+            Ev::Listed {
+                address,
+                result,
+                live,
+            } => {
+                let current = self.address().as_deref() == Some(address.as_str());
+                let keep_id = current
+                    .then(|| self.summary().map(|s| s.id.clone()))
+                    .flatten();
+                let mail = self.mail.entry(address.clone()).or_default();
+                mail.live = live;
+                mail.checked = Some(Instant::now());
+                match result {
+                    Ok(list) => {
+                        let new: Vec<&Summary> = if mail.loaded {
+                            let known: HashSet<&str> =
+                                mail.messages.iter().map(|s| s.id.as_str()).collect();
+                            list.iter()
+                                .filter(|s| !known.contains(s.id.as_str()))
+                                .collect()
+                        } else {
+                            Vec::new()
+                        };
+                        let announce = new.first().map(|s| {
+                            format!(
+                                "new mail for {}: {}",
+                                crate::provider::local_part(&address),
+                                clean_line(&s.subject)
+                            )
+                        });
+                        for s in &new {
+                            self.fresh.insert((address.clone(), s.id.clone()));
+                        }
+                        mail.messages = list;
+                        mail.loaded = true;
+                        mail.error = None;
+                        if let Some(text) = announce {
+                            self.say(text);
+                        }
+                    }
+                    Err(e) => {
+                        mail.loaded = true;
+                        mail.error = Some(e);
+                    }
+                }
+                if current {
+                    // Keep the cursor on the same message as the list shifts.
+                    let msgs = self.messages();
+                    let n = keep_id
+                        .and_then(|id| msgs.iter().position(|s| s.id == id))
+                        .or((!msgs.is_empty()).then_some(0));
+                    self.msg_state.select(n);
+                    self.load_preview();
+                }
+            }
+            Ev::Opened { address, result } => match result {
+                Ok(msg) => {
+                    let key = (address, msg.id.clone());
+                    if self.shown.as_ref() == Some(&key) {
+                        self.preview = Preview::Ready(msg.clone());
+                    }
+                    if let Some(m) = self.mail.get_mut(&key.0) {
+                        if let Some(s) = m.messages.iter_mut().find(|s| s.id == key.1) {
+                            s.seen = true;
+                        }
+                    }
+                    self.cache.insert(key, msg);
+                }
+                Err(e) => {
+                    if self.shown.as_ref().is_some_and(|(a, _)| *a == address) {
+                        self.preview = Preview::Failed(e);
+                    }
+                }
+            },
+            Ev::Deleted { address, id } => {
+                if let Some(m) = self.mail.get_mut(&address) {
+                    m.messages.retain(|s| s.id != id);
+                }
+                self.cache.remove(&(address, id));
+                let len = self.messages().len();
+                if self.msg_state.selected().is_some_and(|n| n >= len) {
+                    self.msg_state.select(len.checked_sub(1));
+                }
+                self.load_preview();
+                self.say("message deleted");
+            }
+            Ev::Fatal(_) => unreachable!("handled in run"),
+        }
+    }
+
+    fn select_inbox(&mut self, n: Option<usize>) {
+        self.inbox_state.select(n);
+        let has = !self.messages().is_empty();
+        self.msg_state.select(has.then_some(0));
+        self.load_preview();
+    }
+
+    /// Shows the selected message, fetching it unless it is cached.
+    fn load_preview(&mut self) {
+        let key = self.address().zip(self.summary().map(|s| s.id.clone()));
+        if key == self.shown && !matches!(self.preview, Preview::Failed(_)) {
+            return;
+        }
+        self.scroll = 0;
+        self.shown = key.clone();
+        self.preview = match key {
+            None => Preview::None,
+            Some(key) => match self.cache.get(&key) {
+                Some(m) => Preview::Ready(m.clone()),
+                None => {
+                    self.send(Req::Open {
+                        address: key.0,
+                        id: key.1,
+                    });
+                    Preview::Loading
+                }
+            },
+        };
+    }
+
+    // ----- keys -----
+
+    fn key(&mut self, key: KeyEvent, app: &mut App) {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        if ctrl && key.code == KeyCode::Char('c') {
+            self.quit = true;
+            return;
+        }
+        // No Alt bindings; a lone Esc followed by a key can arrive as one.
+        if key.modifiers.contains(KeyModifiers::ALT) {
+            return;
+        }
+        if let Some(confirm) = self.confirm.take() {
+            if matches!(key.code, KeyCode::Char('y') | KeyCode::Char('Y')) {
+                match confirm {
+                    Confirm::DeleteMessage { address, id } => {
+                        self.send(Req::DeleteMessage { address, id })
+                    }
+                    Confirm::Drop(address) => {
+                        self.say(format!("dropping {address}"));
+                        self.send(Req::Drop(address));
+                    }
+                }
+            }
+            return;
+        }
+        if self.help {
+            self.help = false;
+            return;
+        }
+        match key.code {
+            KeyCode::Char('q') => self.quit = true,
+            KeyCode::Esc => match self.focus {
+                Focus::Inboxes => self.quit = true,
+                Focus::Messages => self.focus = Focus::Inboxes,
+                Focus::Preview => self.focus = Focus::Messages,
+            },
+            KeyCode::Char('?') => self.help = true,
+            KeyCode::Tab => {
+                self.focus = match self.focus {
+                    Focus::Inboxes => Focus::Messages,
+                    Focus::Messages => Focus::Preview,
+                    Focus::Preview => Focus::Inboxes,
+                }
+            }
+            KeyCode::BackTab => {
+                self.focus = match self.focus {
+                    Focus::Inboxes => Focus::Preview,
+                    Focus::Messages => Focus::Inboxes,
+                    Focus::Preview => Focus::Messages,
+                }
+            }
+            KeyCode::Right | KeyCode::Char('l') | KeyCode::Enter => {
+                self.focus = match self.focus {
+                    Focus::Inboxes => Focus::Messages,
+                    _ => Focus::Preview,
+                }
+            }
+            KeyCode::Left | KeyCode::Char('h') => {
+                self.focus = match self.focus {
+                    Focus::Preview => Focus::Messages,
+                    _ => Focus::Inboxes,
+                }
+            }
+            KeyCode::Down | KeyCode::Char('j') => self.step(1),
+            KeyCode::Up | KeyCode::Char('k') => self.step(-1),
+            KeyCode::PageDown | KeyCode::Char(' ') => self.scroll = self.scroll.saturating_add(10),
+            KeyCode::PageUp => self.scroll = self.scroll.saturating_sub(10),
+            KeyCode::Home | KeyCode::Char('g') => self.jump(false),
+            KeyCode::End | KeyCode::Char('G') => self.jump(true),
+            KeyCode::Char('n') => {
+                self.say("creating an inbox...");
+                self.send(Req::Create);
+            }
+            KeyCode::Char('a') => {
+                if let Some(a) = self.address() {
+                    self.say(format!("{a} is now the active inbox"));
+                    self.send(Req::Use(a));
+                }
+            }
+            KeyCode::Char('r') => {
+                if let Some(a) = self.address() {
+                    self.say("checking...");
+                    self.send(Req::Refresh(a));
+                }
+            }
+            KeyCode::Char('c') => {
+                if let Some(a) = self.address() {
+                    self.copy(app, &a, &a);
+                }
+            }
+            KeyCode::Char('y') => match self.message().map(code_of) {
+                Some(Some(code)) => self.copy(app, &code, &format!("code {code}")),
+                Some(None) => self.say("no code found in this message"),
+                None => {}
+            },
+            KeyCode::Char('L') => match self.message().map(message_links) {
+                Some(links) if !links.is_empty() => self.copy(app, &links[0], "the first link"),
+                Some(_) => self.say("no links in this message"),
+                None => {}
+            },
+            KeyCode::Char('O') => match self.message().map(message_links) {
+                Some(links) if !links.is_empty() => {
+                    match system::open(&links[0], app.browser().as_deref()) {
+                        Ok(()) => self.say(format!("opened {}", clean_line(&links[0]))),
+                        Err(e) => self.say(format!("could not open the link: {e:#}")),
+                    }
+                }
+                Some(_) => self.say("no links in this message"),
+                None => {}
+            },
+            KeyCode::Char('o') => {
+                if let Some(msg) = self.message().cloned() {
+                    if let Err(e) = app.open_html(&msg, false) {
+                        self.say(format!("could not open the message: {e}"));
+                    }
+                }
+            }
+            KeyCode::Char('d') => {
+                if let (Some(address), Some(s)) = (self.address(), self.summary()) {
+                    self.confirm = Some(Confirm::DeleteMessage {
+                        address,
+                        id: s.id.clone(),
+                    });
+                }
+            }
+            KeyCode::Char('D') => {
+                if let Some(a) = self.address() {
+                    self.confirm = Some(Confirm::Drop(a));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn copy(&mut self, app: &App, text: &str, what: &str) {
+        match system::copy(text, app.clipboard_cmd().as_deref()) {
+            Ok(()) => self.say(format!("copied {}", clean_line(what))),
+            Err(e) => self.say(format!("could not copy: {e:#}")),
+        }
+    }
+
+    fn step(&mut self, by: i32) {
+        let move_in = |state: &mut ListState, len: usize| {
+            if len == 0 {
+                return;
+            }
+            let n = state.selected().unwrap_or(0) as i32 + by;
+            state.select(Some(n.clamp(0, len as i32 - 1) as usize));
+        };
+        match self.focus {
+            Focus::Inboxes => {
+                let mut state = self.inbox_state.clone();
+                move_in(&mut state, self.inboxes.len());
+                if state.selected() != self.inbox_state.selected() {
+                    self.select_inbox(state.selected());
+                }
+            }
+            Focus::Messages => {
+                let len = self.messages().len();
+                move_in(&mut self.msg_state, len);
+                self.load_preview();
+            }
+            Focus::Preview => {
+                self.scroll = if by > 0 {
+                    self.scroll.saturating_add(1)
+                } else {
+                    self.scroll.saturating_sub(1)
+                };
+            }
+        }
+    }
+
+    fn jump(&mut self, end: bool) {
+        match self.focus {
+            Focus::Inboxes => {
+                let n = if end {
+                    self.inboxes.len().checked_sub(1)
+                } else {
+                    Some(0)
+                };
+                self.select_inbox(n.filter(|_| !self.inboxes.is_empty()));
+            }
+            Focus::Messages => {
+                let len = self.messages().len();
+                let n = if end {
+                    len.checked_sub(1)
+                } else {
+                    (len > 0).then_some(0)
+                };
+                self.msg_state.select(n);
+                self.load_preview();
+            }
+            Focus::Preview => self.scroll = if end { u16::MAX / 2 } else { 0 },
+        }
+    }
+
+    // ----- drawing -----
+
+    fn draw(&mut self, f: &mut Frame) {
+        let [header, body, footer] = Layout::vertical([
+            Constraint::Length(1),
+            Constraint::Min(3),
+            Constraint::Length(1),
+        ])
+        .areas(f.area());
+        let side = (body.width / 3).clamp(24, 36);
+        let [left, right] =
+            Layout::horizontal([Constraint::Length(side), Constraint::Min(20)]).areas(body);
+        let list_height = (self.messages().len() as u16 + 2).clamp(4, right.height / 3 + 2);
+        let [top, bottom] =
+            Layout::vertical([Constraint::Length(list_height), Constraint::Min(3)]).areas(right);
+
+        self.draw_header(f, header);
+        self.draw_inboxes(f, left);
+        self.draw_messages(f, top);
+        self.draw_preview(f, bottom);
+        self.draw_footer(f, footer);
+        if self.help {
+            draw_help(f);
+        }
+    }
+
+    fn block(&self, title: String, pane: Focus) -> Block<'static> {
+        let focused = self.focus == pane;
+        Block::bordered()
+            .title(Span::styled(
+                format!(" {title} "),
+                if focused {
+                    Style::new().bold()
+                } else {
+                    Style::new().dim()
+                },
+            ))
+            .border_style(if focused {
+                Style::new().fg(Color::Cyan)
+            } else {
+                Style::new().dim()
+            })
+    }
+
+    fn draw_header(&self, f: &mut Frame, area: Rect) {
+        let mut spans = vec![Span::styled(" tmpmail ", Style::new().bold().reversed())];
+        if let Some(i) = self.inbox() {
+            spans.push(Span::raw("  "));
+            spans.push(Span::styled(clean_line(&i.address), Style::new().bold()));
+            spans.push(Span::styled(
+                format!("  {}", i.provider),
+                Style::new().dim(),
+            ));
+        }
+        let status = self.inbox().and_then(|i| self.mail.get(&i.address));
+        let right = match status {
+            _ if self.inbox().is_some_and(Inbox::is_expired) => {
+                Span::styled("expired ", Style::new().fg(Color::Red))
+            }
+            Some(m) if m.error.is_some() => {
+                Span::styled("unreachable ", Style::new().fg(Color::Red))
+            }
+            Some(m) if m.live => Span::styled("● live ", Style::new().fg(Color::Green)),
+            Some(Mail {
+                checked: Some(t), ..
+            }) => Span::styled(
+                format!("checked {}s ago ", t.elapsed().as_secs()),
+                Style::new().dim(),
+            ),
+            _ => Span::styled("connecting ", Style::new().dim()),
+        };
+        f.render_widget(Line::from(spans), area);
+        f.render_widget(Line::from(right).right_aligned(), area);
+    }
+
+    fn draw_inboxes(&mut self, f: &mut Frame, area: Rect) {
+        let block = self.block(format!("Inboxes {}", self.inboxes.len()), Focus::Inboxes);
+        if self.inboxes.is_empty() {
+            let p = Paragraph::new("No inboxes yet.\nPress n to create one.")
+                .wrap(Wrap { trim: false })
+                .block(block);
+            f.render_widget(p, area);
+            return;
+        }
+        let items: Vec<ListItem> = self
+            .inboxes
+            .iter()
+            .map(|i| {
+                let active = self.active.as_deref() == Some(i.address.as_str());
+                let unread = self
+                    .mail
+                    .get(&i.address)
+                    .map_or(0, |m| m.messages.iter().filter(|s| !s.seen).count());
+                let mut first = vec![
+                    Span::styled(
+                        if active { "* " } else { "  " },
+                        Style::new().fg(Color::Green),
+                    ),
+                    Span::styled(clean_line(i.local_part()), Style::new().bold()),
+                ];
+                if unread > 0 {
+                    first.push(Span::styled(
+                        format!(" {unread}"),
+                        Style::new().fg(Color::Cyan),
+                    ));
+                }
+                let domain = i.address.split('@').nth(1).unwrap_or_default();
+                let mut second = format!("  @{}", clean_line(domain));
+                if let Some(l) = &i.label {
+                    second = format!("  [{}] @{}", clean_line(l), clean_line(domain));
+                }
+                let when = match i.expires_at {
+                    _ if i.is_expired() => Span::styled("  expired", Style::new().fg(Color::Red)),
+                    Some(t) => {
+                        Span::styled(format!("  expires {}", relative(t)), Style::new().dim())
+                    }
+                    None => Span::raw(""),
+                };
+                ListItem::new(vec![
+                    Line::from(first),
+                    Line::from(Span::styled(second, Style::new().dim())),
+                    Line::from(when),
+                ])
+            })
+            .collect();
+        let list = List::new(items)
+            .block(block)
+            .highlight_style(Style::new().add_modifier(Modifier::REVERSED));
+        f.render_stateful_widget(list, area, &mut self.inbox_state);
+    }
+
+    fn draw_messages(&mut self, f: &mut Frame, area: Rect) {
+        let address = self.address().unwrap_or_default();
+        let mail = self.mail.get(&address);
+        let count = mail.map_or(0, |m| m.messages.len());
+        let block = self.block(format!("Messages {count}"), Focus::Messages);
+        let empty = match mail {
+            _ if address.is_empty() => Some("".to_string()),
+            None => Some("Loading...".to_string()),
+            Some(m) if m.messages.is_empty() => Some(match &m.error {
+                Some(e) => format!("Unavailable: {}", clean_line(e)),
+                None => "No mail yet. New messages appear here as they arrive.".to_string(),
+            }),
+            _ => None,
+        };
+        if let Some(text) = empty {
+            f.render_widget(
+                Paragraph::new(text)
+                    .wrap(Wrap { trim: false })
+                    .dim()
+                    .block(block),
+                area,
+            );
+            return;
+        }
+        let width = area.width.saturating_sub(2) as usize;
+        let items: Vec<ListItem> = self
+            .messages()
+            .iter()
+            .map(|s| {
+                let fresh = self.fresh.contains(&(address.clone(), s.id.clone()));
+                let marker = match () {
+                    _ if fresh => Span::styled("● ", Style::new().fg(Color::Green)),
+                    _ if !s.seen => Span::styled("● ", Style::new().fg(Color::Cyan)),
+                    _ => Span::raw("  "),
+                };
+                let when = s.date.map(relative).unwrap_or_default();
+                let from_w = (width / 4).clamp(10, 28);
+                let from = crate::app::truncate(&clean_line(&sender_name(&s.from)), from_w);
+                let subject_style = if s.seen {
+                    Style::new()
+                } else {
+                    Style::new().bold()
+                };
+                let mut spans = vec![
+                    marker,
+                    Span::styled(format!("{when:>8}  "), Style::new().dim()),
+                    Span::raw(format!("{from:<from_w$}  ")),
+                    Span::styled(clean_line(&s.subject), subject_style),
+                ];
+                if s.has_attachments {
+                    spans.push(Span::styled(" +att", Style::new().fg(Color::Yellow)));
+                }
+                ListItem::new(Line::from(spans))
+            })
+            .collect();
+        let list = List::new(items)
+            .block(block)
+            .highlight_style(Style::new().add_modifier(Modifier::REVERSED));
+        f.render_stateful_widget(list, area, &mut self.msg_state);
+    }
+
+    fn draw_preview(&mut self, f: &mut Frame, area: Rect) {
+        let block = self.block("Message".into(), Focus::Preview);
+        let inner = block.inner(area);
+        let text = match &self.preview {
+            Preview::None => Text::from(""),
+            Preview::Loading => Text::from("Loading...").dim(),
+            Preview::Failed(e) => {
+                Text::from(format!("Could not load this message: {}", clean_line(e))).fg(Color::Red)
+            }
+            Preview::Ready(msg) => {
+                let fresh = self
+                    .rendered
+                    .as_ref()
+                    .is_none_or(|(id, w, _)| *id != msg.id || *w != inner.width);
+                if fresh {
+                    self.rendered = Some((
+                        msg.id.clone(),
+                        inner.width,
+                        render_message(msg, inner.width),
+                    ));
+                }
+                self.rendered
+                    .as_ref()
+                    .map(|(_, _, t)| t.clone())
+                    .unwrap_or_default()
+            }
+        };
+        // Keep the scroll within the text (lines can wrap, so allow some slack).
+        let max = (text.lines.len() as u16).saturating_sub(inner.height / 2);
+        self.scroll = self.scroll.min(max);
+        let p = Paragraph::new(text)
+            .wrap(Wrap { trim: false })
+            .scroll((self.scroll, 0))
+            .block(block);
+        f.render_widget(p, area);
+    }
+
+    fn draw_footer(&mut self, f: &mut Frame, area: Rect) {
+        if let Some(confirm) = &self.confirm {
+            let q = match confirm {
+                Confirm::DeleteMessage { .. } => "Delete this message?".to_string(),
+                Confirm::Drop(a) => format!("Delete inbox {} for good?", clean_line(a)),
+            };
+            let line = Line::from(vec![
+                Span::styled(format!(" {q} "), Style::new().fg(Color::Yellow).bold()),
+                Span::raw(" y to confirm, any other key to cancel"),
+            ]);
+            f.render_widget(line, area);
+            return;
+        }
+        if self
+            .status
+            .as_ref()
+            .is_some_and(|(_, t)| t.elapsed() > STATUS_TTL)
+        {
+            self.status = None;
+        }
+        let keys: &[(&str, &str)] = match self.focus {
+            Focus::Inboxes => &[
+                ("n", "new"),
+                ("c", "copy"),
+                ("a", "make active"),
+                ("D", "delete inbox"),
+            ],
+            Focus::Messages => &[
+                ("y", "copy code"),
+                ("o", "open"),
+                ("d", "delete"),
+                ("r", "refresh"),
+            ],
+            Focus::Preview => &[
+                ("y", "copy code"),
+                ("L", "copy link"),
+                ("O", "open link"),
+                ("o", "open"),
+            ],
+        };
+        let mut spans = vec![Span::raw(" ")];
+        for (k, what) in keys.iter().chain(&[("?", "help"), ("q", "quit")]) {
+            spans.push(Span::styled(*k, Style::new().bold()));
+            spans.push(Span::styled(format!(" {what}  "), Style::new().dim()));
+        }
+        f.render_widget(Line::from(spans), area);
+        if let Some((msg, _)) = &self.status {
+            f.render_widget(
+                Line::from(Span::styled(
+                    format!("{} ", clean_line(msg)),
+                    Style::new().fg(Color::Cyan),
+                ))
+                .right_aligned(),
+                area,
+            );
+        }
+    }
+}
+
+/// The detected verification code, if the message has one.
+fn code_of(msg: &Message) -> Option<String> {
+    extract::otp(&msg.subject, &message_body(msg), None)
+}
+
+/// `Name <addr>` -> `Name`; a bare address stays as is.
+fn sender_name(from: &str) -> String {
+    match from.split_once('<') {
+        Some((name, _)) if !name.trim().is_empty() => name.trim().trim_matches('"').to_string(),
+        _ => from.trim_matches(|c| c == '<' || c == '>').to_string(),
+    }
+}
+
+/// Headers, the code strip (when there is a code), attachments and body.
+fn render_message(msg: &Message, width: u16) -> Text<'static> {
+    let key = |k: &str| Span::styled(format!("{k:<9}"), Style::new().dim());
+    let mut lines = vec![
+        Line::from(vec![key("From"), Span::raw(clean_line(&msg.from))]),
+        Line::from(vec![key("To"), Span::raw(clean_line(&msg.to.join(", ")))]),
+        Line::from(vec![
+            key("Subject"),
+            Span::styled(clean_line(&msg.subject), Style::new().bold()),
+        ]),
+    ];
+    if let Some(d) = msg.date {
+        let local = d.with_timezone(&chrono::Local);
+        lines.push(Line::from(vec![
+            key("Date"),
+            Span::raw(format!(
+                "{} ({})",
+                local.format("%Y-%m-%d %H:%M"),
+                relative(d)
+            )),
+        ]));
+    }
+    if !msg.attachments.is_empty() {
+        let names: Vec<String> = msg
+            .attachments
+            .iter()
+            .map(|a| clean_line(&a.filename))
+            .collect();
+        lines.push(Line::from(vec![
+            key("Files"),
+            Span::styled(names.join(", "), Style::new().fg(Color::Yellow)),
+        ]));
+    }
+    lines.push(Line::from(""));
+    if let Some(code) = code_of(msg) {
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!("  {}  ", clean_line(&code)),
+                Style::new().fg(Color::Black).bg(Color::Yellow).bold(),
+            ),
+            Span::styled("  y copies the code", Style::new().dim()),
+        ]));
+        lines.push(Line::from(""));
+    }
+    let body = body_text(
+        msg.text.as_deref(),
+        msg.html.as_deref(),
+        (width as usize).clamp(20, 100),
+    );
+    for line in clean(body.trim_end()).lines() {
+        lines.push(Line::from(line.to_string()));
+    }
+    Text::from(lines)
+}
+
+fn draw_help(f: &mut Frame) {
+    const KEYS: &[(&str, &str)] = &[
+        ("Tab / ← →", "move between panes"),
+        ("↑ ↓ / j k", "move, or scroll the message"),
+        ("PgUp PgDn", "scroll the message"),
+        ("n", "create a new inbox"),
+        ("a", "make the selected inbox the active one"),
+        ("c", "copy the inbox address"),
+        ("D", "delete the inbox"),
+        ("y", "copy the verification code"),
+        ("L / O", "copy / open the first link"),
+        ("o", "open the message in the browser"),
+        ("d", "delete the message"),
+        ("r", "check the inbox now"),
+        ("q", "quit"),
+    ];
+    let area = f.area();
+    let w = 54.min(area.width);
+    let h = (KEYS.len() as u16 + 2).min(area.height);
+    let rect = Rect::new(
+        area.x + (area.width - w) / 2,
+        area.y + (area.height - h) / 2,
+        w,
+        h,
+    );
+    let lines: Vec<Line> = KEYS
+        .iter()
+        .map(|(k, what)| {
+            Line::from(vec![
+                Span::styled(format!(" {k:<12}"), Style::new().bold()),
+                Span::raw(*what),
+            ])
+        })
+        .collect();
+    f.render_widget(Clear, rect);
+    f.render_widget(
+        Paragraph::new(lines).block(
+            Block::bordered()
+                .title(" Keys ")
+                .border_style(Style::new().fg(Color::Cyan)),
+        ),
+        rect,
+    );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sender_names() {
+        assert_eq!(sender_name("GitHub <noreply@github.com>"), "GitHub");
+        assert_eq!(sender_name("\"Acme Inc\" <a@acme.io>"), "Acme Inc");
+        assert_eq!(sender_name("<a@b.c>"), "a@b.c");
+        assert_eq!(sender_name("a@b.c"), "a@b.c");
+    }
+
+    #[test]
+    fn the_code_strip_shows_up_for_codes_only() {
+        let msg = Message {
+            id: "1".into(),
+            subject: "Your verification code".into(),
+            text: Some("Your code is 482913. It expires in 10 minutes.".into()),
+            ..Default::default()
+        };
+        let text = render_message(&msg, 80);
+        assert!(
+            text.lines
+                .iter()
+                .any(|l| l.to_string().contains("482913  "))
+        );
+        let plain = Message {
+            text: Some("Hello there".into()),
+            ..msg
+        };
+        let text = render_message(&plain, 80);
+        assert!(
+            !text
+                .lines
+                .iter()
+                .any(|l| l.to_string().contains("y copies"))
+        );
+    }
+
+    fn summary(id: &str, subject: &str) -> Summary {
+        Summary {
+            id: id.into(),
+            subject: subject.into(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn mail_arriving_later_is_marked_new_and_announced() {
+        let (tx, rx) = channel();
+        let mut ui = Ui::new(tx);
+        let inbox = Inbox::new("mailtm", "a@x.com".into(), serde_json::Value::Null);
+        ui.event(Ev::Inboxes {
+            inboxes: vec![inbox],
+            active: None,
+        });
+        let listed = |list: Vec<Summary>| Ev::Listed {
+            address: "a@x.com".into(),
+            result: Ok(list),
+            live: true,
+        };
+        ui.event(listed(vec![summary("1", "old")]));
+        assert!(ui.fresh.is_empty(), "the first listing is not news");
+        assert!(ui.status.is_none());
+        assert_eq!(ui.msg_state.selected(), Some(0));
+        // Selecting the message asked the worker for it.
+        assert!(matches!(rx.try_recv(), Ok(Req::Open { id, .. }) if id == "1"));
+
+        ui.event(listed(vec![summary("2", "Your code"), summary("1", "old")]));
+        assert!(ui.fresh.contains(&("a@x.com".to_string(), "2".to_string())));
+        assert!(ui.status.as_ref().unwrap().0.contains("Your code"));
+        // The cursor stays on the message it was on.
+        assert_eq!(ui.summary().unwrap().id, "1");
+    }
+}

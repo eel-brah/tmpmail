@@ -179,6 +179,35 @@ there are shown dimmed at start. With `--json` it prints one JSON object per lin
 tmpmail watch --rotate 30m -c    # a new address every half hour, copied each time
 ```
 
+### `tui`: full-screen browser
+
+```sh
+tmpmail tui
+```
+
+Your inboxes on the left, the selected inbox's mail at the top right and the selected message
+below it. Every inbox is checked in the background on the same schedule as `watch` (push on
+mail.tm and DropMail, polling elsewhere), so new mail appears on its own; the header shows
+`● live` when the selected inbox has a push connection. When a message contains a
+verification code, the preview shows it highlighted at the top and `y` copies it.
+
+| Key | Action |
+|---|---|
+| `Tab`, `←` `→` (`h` `l`), `Enter` | Move between panes |
+| `↑` `↓` (`j` `k`), `g` `G` | Move in a list, or scroll the message |
+| `PgUp` `PgDn`, `Space` | Scroll the message |
+| `n` | Create an inbox (with the same fallback as `new`) |
+| `a` | Make the selected inbox the active one |
+| `c` | Copy the selected inbox's address |
+| `D` | Delete the selected inbox (asks first) |
+| `y` | Copy the verification code |
+| `L` / `O` | Copy / open the message's first link (verification links first) |
+| `o` | Open the message's sanitized HTML in the browser, like `read --html` |
+| `d` | Delete the message (asks first) |
+| `r` | Check the selected inbox now |
+| `?` | Show the keys |
+| `q`, `Esc`, `Ctrl+C` | Quit (`Esc` steps back a pane first) |
+
 ### `attachments`: list attachments
 
 Shows each attachment's id, file name, type and size. Takes `ID` or `--recent`/`-r` like `read`.
@@ -281,6 +310,42 @@ by `new`). It also shows what each one supports:
 | Option | Explanation |
 |---|---|
 | `--check` | Contact each provider now and show `ok` with the response time, or `DOWN` with the reason. |
+
+### `mcp`: server for AI agents
+
+Runs a [Model Context Protocol](https://modelcontextprotocol.io) server on stdin/stdout, so
+an AI agent can create inboxes and wait for verification mail. Register it with your client,
+for example Claude Code:
+
+```sh
+claude mcp add tmpmail -- tmpmail mcp
+```
+
+or, in a client's JSON config:
+
+```json
+{ "mcpServers": { "tmpmail": { "command": "tmpmail", "args": ["mcp"] } } }
+```
+
+| Tool | What it does |
+|---|---|
+| `create_inbox` | New address, with provider fallback. Optional `provider`, `user`, `domain`, `label`. Does not change your active inbox if you have one. |
+| `list_inboxes` | Your saved inboxes, as in `inboxes --json`. |
+| `list_messages` | Messages in an inbox, newest first. |
+| `read_message` | One message as text, with ranked links and attachment names (`include_html` adds the HTML). |
+| `wait_for_message` | Blocks until a message matching `from` / `subject` / `body` (regexes) arrives. |
+| `get_verification_code` | The OTP in message `id`, or waits for a message that has one. Optional `regex`. |
+| `get_links` | Links in message `id`, or waits for a message with a link matching `match`. |
+| `delete_message`, `delete_inbox` | Clean up. |
+
+Every tool takes `inbox` (address, local part or label; default: the active inbox). The waiting
+tools take `timeout` (default 120 s, at most 600 s, since clients give up on long calls) and
+`include_existing`, which is **true** by default here, unlike the CLI: the agent usually
+triggers the mail before it calls the tool, and must not miss it. Pass `false` to wait for new
+mail only.
+
+Mail comes from anyone who knows the address. The server tells the client to treat message
+contents as untrusted data, but an agent that acts on mail can still be steered by it.
 
 ### `man`: manual pages
 

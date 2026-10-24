@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::io::{IsTerminal, Write};
+use std::sync::mpsc::Sender;
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
@@ -25,11 +26,13 @@ pub struct App {
     color: bool,
     /// Built once per run so providers can reuse what they fetched.
     providers: HashMap<String, Box<dyn Provider>>,
+    /// Where notes and warnings go instead of stderr (the TUI owns the screen).
+    log: Option<Sender<String>>,
 }
 
 /// What `--json` prints for an inbox. Credentials are never included.
 #[derive(Serialize)]
-struct InboxView<'a> {
+pub(crate) struct InboxView<'a> {
     address: &'a str,
     provider: &'a str,
     label: Option<&'a str>,
@@ -76,7 +79,13 @@ impl App {
             state,
             color,
             providers: HashMap::new(),
+            log: None,
         })
+    }
+
+    /// Sends notes and warnings to `log` instead of printing them.
+    pub fn log_to(&mut self, log: Sender<String>) {
+        self.log = Some(log);
     }
 
     pub fn run(&mut self, command: Command) -> Result<()> {
@@ -101,6 +110,8 @@ impl App {
             Command::Drop(a) => self.drop_inbox(a),
             Command::Rotate(a) => self.rotate(a),
             Command::Providers(a) => self.providers(a),
+            Command::Tui => crate::tui::run(self),
+            Command::Mcp => crate::mcp::serve(self),
             Command::Completions { .. } | Command::Man { .. } => unreachable!("handled in main"),
         }
     }
@@ -147,16 +158,22 @@ impl App {
 
     /// Messages can quote provider responses, so they are cleaned like mail.
     fn note(&self, msg: &str) {
-        if !self.global.quiet && !self.global.json {
+        if let Some(log) = &self.log {
+            let _ = log.send(clean_line(msg));
+        } else if !self.global.quiet && !self.global.json {
             eprintln!("{}", self.dim(&clean(msg)));
         }
     }
 
     fn warn(&self, msg: &str) {
-        eprintln!("tmpmail: {}", clean_line(msg));
+        if let Some(log) = &self.log {
+            let _ = log.send(clean_line(msg));
+        } else {
+            eprintln!("tmpmail: {}", clean_line(msg));
+        }
     }
 
-    fn view<'a>(&self, inbox: &'a Inbox) -> InboxView<'a> {
+    pub(crate) fn view<'a>(&self, inbox: &'a Inbox) -> InboxView<'a> {
         InboxView {
             address: &inbox.address,
             provider: &inbox.provider,
@@ -183,7 +200,7 @@ impl App {
         self.with_inbox_at(n, f)
     }
 
-    fn with_inbox_at<T>(
+    pub(crate) fn with_inbox_at<T>(
         &mut self,
         n: usize,
         f: impl FnOnce(&dyn Provider, &mut Inbox) -> Result<T>,
@@ -233,14 +250,18 @@ impl App {
         Ok(&self.state.inboxes[n])
     }
 
-    fn sorted_list(p: &dyn Provider, inbox: &mut Inbox) -> Result<Vec<Summary>> {
+    pub(crate) fn sorted_list(p: &dyn Provider, inbox: &mut Inbox) -> Result<Vec<Summary>> {
         let mut list = p.list(inbox)?;
         list.sort_by_key(|s| std::cmp::Reverse(s.date));
         Ok(list)
     }
 
     /// Accepts an exact id, a list number from `ls`, or a unique id prefix.
-    fn resolve_id(p: &dyn Provider, inbox: &mut Inbox, id: Option<&str>) -> Result<String> {
+    pub(crate) fn resolve_id(
+        p: &dyn Provider,
+        inbox: &mut Inbox,
+        id: Option<&str>,
+    ) -> Result<String> {
         let list = Self::sorted_list(p, inbox)?;
         let Some(id) = id else {
             return list
@@ -338,7 +359,7 @@ impl App {
 
     /// Creates an inbox with `explicit`, or else the first configured
     /// provider (other than `exclude`) that supports `opts` and works.
-    fn create_with_fallback(
+    pub(crate) fn create_with_fallback(
         &self,
         explicit: Option<&str>,
         exclude: Option<&str>,
@@ -416,14 +437,14 @@ impl App {
         }
     }
 
-    fn clipboard_cmd(&self) -> Option<String> {
+    pub(crate) fn clipboard_cmd(&self) -> Option<String> {
         self.global
             .clipboard_cmd
             .clone()
             .or_else(|| self.config.clipboard_cmd.clone())
     }
 
-    fn browser(&self) -> Option<String> {
+    pub(crate) fn browser(&self) -> Option<String> {
         self.global
             .browser
             .clone()
@@ -624,7 +645,7 @@ impl App {
         out
     }
 
-    fn open_html(&self, msg: &Message, images: bool) -> Result<()> {
+    pub(crate) fn open_html(&self, msg: &Message, images: bool) -> Result<()> {
         let html = match (&msg.html, &msg.text) {
             (Some(h), _) => h.clone(),
             (None, Some(t)) => format!("<pre>{}</pre>", crate::render::escape_html(t)),
@@ -707,7 +728,7 @@ impl App {
     /// `accept` (given the message and its body text) returns `Some`, or
     /// times out. Returns the inbox index, the message, its body text and what
     /// `accept` found.
-    fn wait_for<T>(
+    pub(crate) fn wait_for<T>(
         &mut self,
         f: &WaitFilter,
         accept: impl Fn(&Message, &str) -> Option<T>,
@@ -1290,7 +1311,7 @@ impl App {
     /// Creates a fresh inbox to replace the selected one, with the same
     /// provider if it works, and drops the old one unless `keep`. The caller
     /// stores the new inbox.
-    fn replace_current(&mut self, keep: bool) -> Result<Inbox> {
+    pub(crate) fn replace_current(&mut self, keep: bool) -> Result<Inbox> {
         let old = self.current()?.clone();
         // Prefer the same provider, fall back like `new` does.
         let opts = CreateOpts::default();
@@ -1312,7 +1333,7 @@ impl App {
     }
 
     /// Removes a stored inbox (by exact address) from the state file.
-    fn forget(&mut self, address: &str) -> Result<()> {
+    pub(crate) fn forget(&mut self, address: &str) -> Result<()> {
         self.state = self
             .store
             .update(|s| {
@@ -1451,7 +1472,7 @@ fn check_health(id: &str) -> Health {
 
 /// Rejects an address a provider returned that couldn't be a real one, such
 /// as one carrying terminal escapes: it is printed and stored as is.
-fn checked_address(p: &dyn Provider, inbox: Inbox) -> Result<Inbox> {
+pub(crate) fn checked_address(p: &dyn Provider, inbox: Inbox) -> Result<Inbox> {
     let a = &inbox.address;
     // `clean_line` drops control and bidi characters and folds whitespace.
     let plausible = a.split('@').count() == 2
@@ -1470,22 +1491,22 @@ fn checked_address(p: &dyn Provider, inbox: Inbox) -> Result<Inbox> {
     }
 }
 
-fn compile(pattern: &str) -> Result<Regex> {
+pub(crate) fn compile(pattern: &str) -> Result<Regex> {
     RegexBuilder::new(pattern)
         .case_insensitive(true)
         .build()
         .map_err(|e| Error::Usage(format!("invalid regex {pattern:?}: {e}")))
 }
 
-fn compile_plain(pattern: &str) -> Result<Regex> {
+pub(crate) fn compile_plain(pattern: &str) -> Result<Regex> {
     Regex::new(pattern).map_err(|e| Error::Usage(format!("invalid regex {pattern:?}: {e}")))
 }
 
-fn message_body(m: &Message) -> String {
+pub(crate) fn message_body(m: &Message) -> String {
     body_text(m.text.as_deref(), m.html.as_deref(), 200)
 }
 
-fn message_links(m: &Message) -> Vec<String> {
+pub(crate) fn message_links(m: &Message) -> Vec<String> {
     extract::links(
         m.text.as_deref().unwrap_or_default(),
         m.html.as_deref().unwrap_or_default(),
@@ -1520,7 +1541,7 @@ fn pad(s: &str, width: usize) -> String {
     format!("{s:<width$}")
 }
 
-fn truncate(s: &str, max: usize) -> String {
+pub(crate) fn truncate(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
         return s.to_string();
     }
@@ -1529,7 +1550,7 @@ fn truncate(s: &str, max: usize) -> String {
     out
 }
 
-fn relative(t: DateTime<Utc>) -> String {
+pub(crate) fn relative(t: DateTime<Utc>) -> String {
     let secs = (Utc::now() - t).num_seconds();
     let (future, secs) = (secs < 0, secs.unsigned_abs());
     let text = match secs {

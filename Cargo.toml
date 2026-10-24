@@ -3,7 +3,7 @@ name = "tmpmail"
 version = "0.1.0"
 edition = "2024"
 description = "Temporary email from the terminal: multiple providers, automatic fallback, wait/OTP/JSON for automation"
-license = "MIT"
+license = "GPL-3.0-or-later"
 rust-version = "1.85"
 
 [dependencies]
@@ -17,6 +17,7 @@ dirs = "7.0.0"
 html2text = "0.17.1"
 qrcode = "0.14.1"
 rand = "0.9"
+ratatui = "0.29.0"
 regex = "1.13.1"
 reqwest = { version = "0.13.5", default-features = false, features = ["blocking", "json", "query", "rustls", "http2"] }
 serde = { version = "1.0.229", features = ["derive"] }

@@ -4,11 +4,13 @@ mod config;
 mod error;
 mod extract;
 mod http;
+mod mcp;
 mod provider;
 mod push;
 mod render;
 mod store;
 mod system;
+mod tui;
 
 use clap::{CommandFactory, Parser};
 
