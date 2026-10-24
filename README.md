@@ -2,7 +2,7 @@
 
 Disposable email for scripts, tests and AI agents. Make an address, sign up with it, and
 get the verification code back in one line of shell. When one provider is down, tmpmail
-moves on to the next.
+[moves on to the next](#choose-the-provider).
 
 [![CI](https://github.com/eel-brah/tmpmail/actions/workflows/ci.yml/badge.svg)](https://github.com/eel-brah/tmpmail/actions/workflows/ci.yml)
 [![Providers](https://github.com/eel-brah/tmpmail/actions/workflows/providers.yml/badge.svg)](https://github.com/eel-brah/tmpmail/actions/workflows/providers.yml)
@@ -101,8 +101,8 @@ verification code is highlighted, and `y` copies it.
 
 ![The tmpmail TUI receiving a mail live and copying its code](assets/tui.gif)
 
-For everything else: `new`, `ls`, `read` (in a pager, or `--html` in your browser), `copy`,
-`qr`, `watch --notify`, `rotate`, `drop`. [All commands](#commands) are listed below.
+The [guide](#guide) below shows each feature in a few lines, and [all commands](#commands)
+are listed under Reference.
 
 ### Coming from the original tmpmail
 
@@ -112,25 +112,166 @@ still works: `tmpmail -g [ADDR]`, `tmpmail`, `tmpmail -r`, `tmpmail ID`, `-d`, `
 It no longer needs `w3m`, `curl` or `jq`.
 [Mapping of the old flags](docs/usage.md#original-tmpmail-flags).
 
+## Guide
+
+Each part is a plain explanation and the commands for it. The [provider table](#providers)
+shows which services support what.
+
+### Create an address
+
+```sh
+tmpmail new              # random, readable address, e.g. quickfox605@maxxspace.com
+tmpmail new -c           # same, and copy it to the clipboard
+tmpmail whoami           # show it again later
+```
+
+The new address becomes the *active* inbox: every other command uses it unless you say
+otherwise (see [several inboxes](#several-inboxes)).
+
+### Choose the username
+
+The part before `@` is random by default. Pick your own with `-u`, or give the whole
+address:
+
+```sh
+tmpmail new -u otter42
+tmpmail new otter42@maxxspace.com
+```
+
+Works on mail.tm, mail.gw, Guerrilla Mail and Maildrop; `tmpmail new` skips the providers
+that can't do it.
+
+### Pick a domain
+
+The part after `@`. List the domains a provider offers, then ask for one:
+
+```sh
+tmpmail domains                  # mail.tm's domains
+tmpmail domains -p dropmail      # DropMail's (about 20 of them)
+tmpmail new -d yomail.info       # tmpmail finds the provider that has it
+```
+
+Useful when a site blocks one disposable domain: try another. Works on mail.tm, mail.gw,
+DropMail and Guerrilla Mail.
+
+### Choose the provider
+
+`tmpmail new` tries the providers in order (`mailtm, dropmail, guerrilla, tempmail_lol,
+mailgw`) and uses the first one that works, telling you if it had to skip one. To use one
+in particular, or change the order:
+
+```sh
+tmpmail new -p guerrilla             # only Guerrilla Mail, no fallback
+tmpmail providers --check            # which ones are up right now
+TMPMAIL_PROVIDER=dropmail,mailtm tmpmail new
+```
+
+The order can also be set for good in the [config file](#configuration).
+
+### Read your mail
+
+```sh
+tmpmail                  # list messages, newest first (same as tmpmail ls)
+tmpmail read 1           # read the newest; long ones open in a pager
+tmpmail read 1 --html    # the HTML version in your browser, sanitized, no remote images
+```
+
+A message can be named by its number in the list, its id, or the first characters of its
+id. With no number, commands use the newest message.
+
+### Wait for a code or link
+
+```sh
+tmpmail otp --wait                    # wait for a new mail with a code, print the code
+tmpmail wait --link --from github     # wait for a mail from GitHub, print its best link
+tmpmail otp 1                         # the code in a message you already have
+tmpmail links 1                       # every link in it, verification links first
+```
+
+Waiting gives up after 180 seconds (`-t` to change it) with exit code 2. It only accepts
+mail that arrives after you start; add `--include-existing` if the mail may already be
+there. `--from`, `--subject` and `--body` narrow it down, and plain words work.
+
+### Live push
+
+With mail.tm and DropMail, tmpmail keeps a connection open and the provider announces new
+mail the moment it lands, so `wait`, `watch` and the TUI react in about a second. Other
+providers are checked every 5 seconds. The TUI shows `● live` while the connection is up.
+Nothing to set up; turn it off with `TMPMAIL_PUSH=0` or `push = false` in the config.
+
+### Attachments
+
+```sh
+tmpmail attachments 1                 # list them
+tmpmail save 1 -o ~/Downloads         # download all of them
+tmpmail save 1 invoice.pdf            # or just one
+```
+
+File names are cleaned up and existing files are never overwritten. Works on mail.tm,
+mail.gw, DropMail and Guerrilla Mail.
+
+### Several inboxes
+
+Give inboxes labels and switch between them by label, address, or the part before `@`:
+
+```sh
+tmpmail new -l github
+tmpmail new -l shop
+tmpmail inboxes                       # all of them, with expiry; * = active
+tmpmail -i github ls                  # one command on another inbox
+tmpmail use shop                      # make it the active one
+tmpmail ls -a                         # mail in every inbox
+tmpmail otp --wait -a                 # a code arriving at any of them
+```
+
+### Log back in
+
+mail.tm and mail.gw inboxes are real accounts that last until you delete them. Set a
+password to use one elsewhere, or log in to an account you made on their website:
+
+```sh
+tmpmail new -p mailtm --password 'correct horse'   # then log in on mail.tm with it
+tmpmail login otter42@maxxspace.com --password 'correct horse'
+```
+
+DropMail sessions expire when idle. tmpmail brings the same address back automatically the
+next time you use it, but mail from the expired session is gone. Guerrilla Mail sessions
+are re-attached to the same address the same way. Maildrop
+inboxes are public, so `tmpmail login name@maildrop.cc` needs no password.
+
+### Clean up
+
+```sh
+tmpmail delete 1                      # delete one message
+tmpmail delete --all                  # every message in the inbox
+tmpmail drop                          # delete the inbox at the provider and forget it
+tmpmail rotate                        # swap the active address for a fresh one
+tmpmail watch --rotate 30m            # a fresh address every 30 minutes
+tmpmail inboxes --prune               # forget inboxes that have expired
+```
+
+Deleting messages works on mail.tm, mail.gw, Guerrilla Mail and Maildrop.
+
 ## Providers
 
-| Id | Service | Inbox | Lifetime | Notes |
-|---|---|---|---|---|
-| `mailtm` | [mail.tm](https://mail.tm) | private | until deleted, mail kept 7 days | default; custom username, attachments, delete, login, push |
-| `dropmail` | [DropMail.me](https://dropmail.me) | private | renewed while used, restorable | many domains, attachments, push |
-| `guerrilla` | [Guerrilla Mail](https://www.guerrillamail.com) | private | 60 min | custom username, attachments |
-| `tempmail_lol` | [tempmail.lol](https://tempmail.lol) | private | 1 hour | last resort; no attachments, and a mail with a text attachment arrives with the attachment as its body |
-| `mailgw` | [mail.gw](https://mail.gw) | private | like mail.tm | same software as mail.tm |
-| `maildrop` | [Maildrop](https://maildrop.cc) | **public** | 24 h idle | opt-in only (`-p maildrop`): anyone can read it; first mail may be delayed by greylisting |
+| Provider | Lifetime | [Username](#choose-the-username) | [Domain](#pick-a-domain) | [Attachments](#attachments) | [Push](#live-push) | [Delete](#clean-up) | [Log back in](#log-back-in) |
+|---|---|:-:|:-:|:-:|:-:|:-:|:-:|
+| [mail.tm](https://mail.tm) `mailtm` | until deleted; mail kept 7 days | ✓ | ✓ | ✓ | ✓ | ✓ | password |
+| [DropMail.me](https://dropmail.me) `dropmail` | renewed while used | | ✓ | ✓ | ✓ | | automatic |
+| [Guerrilla Mail](https://www.guerrillamail.com) `guerrilla` | mail kept 60 min | ✓ | ✓ | ✓ | | ✓ | automatic |
+| [tempmail.lol](https://tempmail.lol) `tempmail_lol` | 1 hour | | | | | | |
+| [mail.gw](https://mail.gw) `mailgw` | until deleted; mail kept 7 days | ✓ | ✓ | ✓ | | ✓ | password |
+| [Maildrop](https://maildrop.cc) `maildrop` | 24 h without mail | ✓ | | | | ✓ | by name |
 
-`tmpmail new` tries `mailtm, dropmail, guerrilla, tempmail_lol, mailgw` in that order. It
-skips providers that can't do what you asked for (say, `--user`), and with `-d` it goes
-straight to one that has the domain. `tmpmail providers --check` shows which are up right
-now.
+- **Maildrop is public**: anyone who guesses the name can read the inbox. It is never used
+  unless you ask for it with `-p maildrop`, and its first mail may be delayed by greylisting.
+- **tempmail.lol** is the last resort: no attachments, and a mail with a text attachment
+  arrives with the attachment in place of its body.
+- **mail.gw** runs the same software as mail.tm and is tried last.
 
-`wait`, `watch` and the TUI hear about new mail at once from providers with push (mail.tm,
-DropMail) and poll the others every 5 seconds. Only documented APIs are used. Many sites
-block known disposable domains; another provider or domain usually gets through.
+How tmpmail picks one is under [choose the provider](#choose-the-provider). Only documented
+APIs are used. Many sites block known disposable domains; [another domain](#pick-a-domain)
+or provider usually gets through.
 
 Thanks to **mail.tm** for its free API; per its terms this client links back to it.
 
@@ -182,6 +323,7 @@ In `--json` mode, errors are printed as `{"error":{"kind":"...","message":"..."}
 
 </details>
 
+<a id="configuration"></a>
 <details>
 <summary><b>Configuration and environment</b></summary>
 
