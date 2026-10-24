@@ -25,7 +25,7 @@ pub struct Cli {
     pub command: Command,
 }
 
-#[derive(Debug, Clone, Args)]
+#[derive(Debug, Clone, Default, Args)]
 pub struct Global {
     /// Machine-readable JSON output
     #[arg(long, global = true)]

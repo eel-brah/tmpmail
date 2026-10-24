@@ -35,6 +35,15 @@ pub fn run(app: &mut App) -> Result<()> {
     let (log_tx, log_rx) = channel();
     app.log_to(log_tx.clone());
     let global = app.global.clone();
+    // `-i` picks the inbox to start on; checked before taking the screen.
+    let start = match &global.inbox {
+        Some(i) => Some(
+            app.state.inboxes[app.state.resolve(Some(i))?]
+                .address
+                .clone(),
+        ),
+        None => None,
+    };
     // Detached: a provider call can block for many seconds, and quitting
     // must not wait for it. The process exits with the UI.
     std::thread::spawn(move || {
@@ -45,6 +54,7 @@ pub fn run(app: &mut App) -> Result<()> {
 
     let mut terminal = ratatui::try_init().map_err(anyhow::Error::from)?;
     let mut ui = Ui::new(req_tx);
+    ui.pending_select = start;
     let result = ui.run(&mut terminal, app, &ev_rx, &log_rx);
     ratatui::restore();
     result

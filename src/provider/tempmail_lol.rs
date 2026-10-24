@@ -2,8 +2,6 @@
 //! One POST to create, one GET to poll. Free inboxes live one hour and their
 //! messages carry no id, so ids are derived from their content.
 
-use std::cell::RefCell;
-
 use chrono::{Duration, Utc};
 use serde_json::{Value, json};
 
@@ -19,8 +17,6 @@ const BASE: &str = "https://api.tempmail.lol/v2";
 pub struct TempmailLol {
     base: String,
     http: Http,
-    /// The last mailbox fetched, by address, so `get` after `list` is free.
-    last: RefCell<Option<(String, Vec<Message>)>>,
 }
 
 impl TempmailLol {
@@ -28,34 +24,48 @@ impl TempmailLol {
         TempmailLol {
             base: base_url("tempmail_lol", BASE),
             http: Http::new("tempmail_lol"),
-            last: RefCell::default(),
         }
     }
 
-    fn emails(&self, inbox: &Inbox) -> Result<Vec<Message>> {
-        let token = inbox.cred_str("token").unwrap_or_default();
+    /// Every email the inbox has received. The API hands out each email
+    /// once, so the ones fetched are kept with the inbox (it lives an hour)
+    /// and merged with whatever the API returns now.
+    fn emails(&self, inbox: &mut Inbox) -> Result<Vec<Message>> {
+        let token = inbox.cred_str("token").unwrap_or_default().to_string();
         let v: Value = match self.http.json(|| {
             self.http
                 .client()
                 .get(format!("{}/inbox", self.base))
-                .query(&[("token", token)])
+                .query(&[("token", &token)])
         }) {
-            // An expired token gets a 404 with `{"expired":true}`.
             Err(Error::NotFound(_)) => return Err(Error::Expired(inbox.address.clone())),
             other => other?,
         };
         if v["expired"].as_bool() == Some(true) {
             return Err(Error::Expired(inbox.address.clone()));
         }
-        let emails: Vec<Message> = v["emails"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .map(|e| to_message(e, &inbox.address))
-            .collect();
-        *self.last.borrow_mut() = Some((inbox.address.clone(), emails.clone()));
-        Ok(emails)
+        let mut kept = kept(inbox);
+        let before = kept.len();
+        for e in v["emails"].as_array().into_iter().flatten() {
+            if !kept.contains(e) {
+                kept.push(e.clone());
+            }
+        }
+        if kept.len() != before {
+            inbox.set_cred("emails", kept.clone());
+        }
+        Ok(kept.iter().map(|e| to_message(e, &inbox.address)).collect())
     }
+}
+
+/// The raw emails stored with the inbox by earlier fetches.
+fn kept(inbox: &Inbox) -> Vec<Value> {
+    inbox
+        .credential
+        .get("emails")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default()
 }
 
 fn to_message(e: &Value, address: &str) -> Message {
@@ -150,13 +160,14 @@ impl Provider for TempmailLol {
     }
 
     fn get(&self, inbox: &mut Inbox, id: &str) -> Result<Message> {
-        // Messages never change, so one seen in the last listing is current.
-        if let Some((address, emails)) = &*self.last.borrow() {
-            if *address == inbox.address {
-                if let Some(m) = emails.iter().find(|m| m.id == id) {
-                    return Ok(m.clone());
-                }
-            }
+        // Messages never change, so a stored one is current.
+        let address = inbox.address.clone();
+        if let Some(m) = kept(inbox)
+            .iter()
+            .map(|e| to_message(e, &address))
+            .find(|m| m.id == id)
+        {
+            return Ok(m);
         }
         self.emails(inbox)?
             .into_iter()
@@ -186,7 +197,6 @@ mod tests {
         let p = TempmailLol {
             base: s.url(),
             http: Http::new("tempmail_lol"),
-            last: RefCell::default(),
         };
         let mut inbox = p.create(&CreateOpts::default()).unwrap();
         let list = p.list(&mut inbox).unwrap();
@@ -194,6 +204,36 @@ mod tests {
         let msg = p.get(&mut inbox, &list[0].id).unwrap();
         assert_eq!(msg.text.as_deref(), Some("code 9999"));
         assert!(msg.html.is_none());
+    }
+
+    #[test]
+    fn keeps_emails_the_api_returns_only_once() {
+        let mut s = Server::new();
+        let first = s
+            .mock("GET", "/inbox")
+            .match_query(Matcher::Any)
+            .with_body(
+                r#"{"emails":[{"from":"x@y.z","subject":"S","body":"code 9999",
+                "date":1791194910000}],"expired":false}"#,
+            )
+            .expect(1)
+            .create();
+        let p = TempmailLol {
+            base: s.url(),
+            http: Http::new("tempmail_lol"),
+        };
+        let mut inbox = Inbox::new("tempmail_lol", "a@b.c".into(), json!({"token":"t"}));
+        let id = p.list(&mut inbox).unwrap()[0].id.clone();
+        first.assert();
+        s.mock("GET", "/inbox")
+            .match_query(Matcher::Any)
+            .with_body(r#"{"emails":[],"expired":false}"#)
+            .create();
+        assert_eq!(p.list(&mut inbox).unwrap().len(), 1);
+        assert_eq!(
+            p.get(&mut inbox, &id).unwrap().text.as_deref(),
+            Some("code 9999")
+        );
     }
 
     #[test]
@@ -206,7 +246,6 @@ mod tests {
         let p = TempmailLol {
             base: s.url(),
             http: Http::new("tempmail_lol"),
-            last: RefCell::default(),
         };
         let mut inbox = Inbox::new("tempmail_lol", "a@b.c".into(), json!({"token":"t"}));
         assert!(matches!(p.list(&mut inbox), Err(Error::Expired(_))));
@@ -223,7 +262,6 @@ mod tests {
         let p = TempmailLol {
             base: s.url(),
             http: Http::new("tempmail_lol"),
-            last: RefCell::default(),
         };
         let mut inbox = Inbox::new("tempmail_lol", "a@b.c".into(), json!({"token":"t"}));
         assert!(matches!(p.list(&mut inbox), Err(Error::Expired(_))));

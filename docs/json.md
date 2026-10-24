@@ -73,6 +73,9 @@ with the receiving address. With `--rotate`, each switch to a new address prints
 }
 ```
 
+Attachment `size` is in bytes, or `null` when the provider doesn't say. mail.tm and mail.gw
+only report whole kilobytes, so their sizes are rounded up to a multiple of 1024.
+
 ## Other commands
 
 | Command | Output |

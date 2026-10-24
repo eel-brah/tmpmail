@@ -229,6 +229,16 @@ impl Poller {
     }
 }
 
+impl Drop for Poller {
+    /// Streams don't end with their poller on their own, so a long-running
+    /// `tmpmail mcp` would keep one connection open per finished wait.
+    fn drop(&mut self) {
+        for s in self.streams.values() {
+            s.stop.store(true, Ordering::Relaxed);
+        }
+    }
+}
+
 /// 4 s, 8 s, 16 s, ... up to five minutes.
 fn backoff(failures: u32) -> Duration {
     Duration::from_secs(2u64 << failures.min(8)).min(MAX_BACKOFF)

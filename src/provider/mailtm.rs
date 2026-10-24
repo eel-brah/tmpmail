@@ -282,7 +282,8 @@ impl Provider for MailTm {
                         id: str_field(att, "id").to_string(),
                         filename: str_field(att, "filename").to_string(),
                         content_type: str_field(att, "contentType").to_string(),
-                        size: att["size"].as_u64(),
+                        // In kilobytes, rounded up (19 bytes comes back as 1).
+                        size: att["size"].as_u64().map(|kb| kb * 1024),
                         url: match str_field(att, "downloadUrl") {
                             "" => None,
                             u if u.starts_with("http") => Some(u.to_string()),
@@ -464,6 +465,7 @@ mod tests {
         let msg = p.get(&mut inbox, "m1").unwrap();
         assert_eq!(msg.html.as_deref(), Some("<p>Your code</p> is 123456"));
         assert_eq!(msg.to, vec!["otter1@maxxspace.com"]);
+        assert_eq!(msg.attachments[0].size, Some(3 * 1024));
         assert_eq!(
             msg.attachments[0].url.as_deref(),
             Some(format!("{}/messages/m1/attachment/ATT1", s.url()).as_str())

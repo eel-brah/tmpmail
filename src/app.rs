@@ -1,5 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::io::{IsTerminal, Write};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
 use std::time::{Duration, Instant};
 
@@ -28,7 +30,12 @@ pub struct App {
     providers: HashMap<String, Box<dyn Provider>>,
     /// Where notes and warnings go instead of stderr (the TUI owns the screen).
     log: Option<Sender<String>>,
+    /// Set from outside (the MCP server) to stop a running wait.
+    cancel: Option<Arc<AtomicBool>>,
 }
+
+/// How often a cancellable wait checks its flag while sleeping.
+const CANCEL_CHECK: Duration = Duration::from_millis(250);
 
 /// What `--json` prints for an inbox. Credentials are never included.
 #[derive(Serialize)]
@@ -80,12 +87,25 @@ impl App {
             color,
             providers: HashMap::new(),
             log: None,
+            cancel: None,
         })
     }
 
     /// Sends notes and warnings to `log` instead of printing them.
     pub fn log_to(&mut self, log: Sender<String>) {
         self.log = Some(log);
+    }
+
+    /// Makes waits give up with `Error::Cancelled` once `flag` is set.
+    pub(crate) fn cancel_on(&mut self, flag: Arc<AtomicBool>) {
+        self.cancel = Some(flag);
+    }
+
+    fn check_cancel(&self) -> Result<()> {
+        match &self.cancel {
+            Some(c) if c.load(Ordering::Relaxed) => Err(Error::Cancelled),
+            _ => Ok(()),
+        }
     }
 
     pub fn run(&mut self, command: Command) -> Result<()> {
@@ -269,13 +289,15 @@ impl App {
                 .map(|s| s.id.clone())
                 .ok_or_else(|| Error::NotFound(format!("no messages in {} yet", inbox.address)));
         };
-        if list.iter().any(|s| s.id == id) {
-            return Ok(id.to_string());
-        }
+        // A list number first: Guerrilla's welcome mail has the id "1", and
+        // `read 1` must still mean the newest message.
         if let Ok(n) = id.parse::<usize>() {
             if (1..=list.len()).contains(&n) {
                 return Ok(list[n - 1].id.clone());
             }
+        }
+        if list.iter().any(|s| s.id == id) {
+            return Ok(id.to_string());
         }
         let hits: Vec<&Summary> = list.iter().filter(|s| s.id.starts_with(id)).collect();
         match hits.as_slice() {
@@ -764,6 +786,7 @@ impl App {
         let mut failing: HashSet<usize> = HashSet::new();
         let mut poller = Poller::new(Duration::from_secs(interval), self.config.push());
         loop {
+            self.check_cancel()?;
             for n in targets.clone() {
                 if !poller.is_due(&self.state.inboxes[n].address) {
                     continue;
@@ -807,7 +830,11 @@ impl App {
             if Instant::now() >= deadline {
                 return Err(Error::Timeout(timeout));
             }
-            poller.sleep(Some(deadline));
+            let wake = match self.cancel {
+                Some(_) => deadline.min(Instant::now() + CANCEL_CHECK),
+                None => deadline,
+            };
+            poller.sleep(Some(wake));
         }
     }
 

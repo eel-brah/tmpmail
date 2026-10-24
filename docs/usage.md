@@ -182,7 +182,7 @@ tmpmail watch --rotate 30m -c    # a new address every half hour, copied each ti
 ### `tui`: full-screen browser
 
 ```sh
-tmpmail tui
+tmpmail tui          # or: tmpmail -i LABEL tui, to start on that inbox
 ```
 
 Your inboxes on the left, the selected inbox's mail at the top right and the selected message
@@ -346,6 +346,9 @@ mail only.
 
 Mail comes from anyone who knows the address. The server tells the client to treat message
 contents as untrusted data, but an agent that acts on mail can still be steered by it.
+
+Each tool call runs on its own thread, so a long wait doesn't hold up other calls, and a
+client's `notifications/cancelled` stops a running wait within a quarter of a second.
 
 ### `man`: manual pages
 

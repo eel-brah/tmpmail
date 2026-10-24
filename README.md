@@ -97,7 +97,7 @@ Tools: `create_inbox`, `list_inboxes`, `list_messages`, `read_message`, `wait_fo
 | `mailtm` | [mail.tm](https://mail.tm) | private | until deleted, mail kept 7 days | default; custom username, attachments, delete, login, push |
 | `dropmail` | [DropMail.me](https://dropmail.me) | private | renewed while used, restorable | many domains, attachments, push |
 | `guerrilla` | [Guerrilla Mail](https://www.guerrillamail.com) | private | 60 min | custom username, attachments |
-| `tempmail_lol` | [tempmail.lol](https://tempmail.lol) | private | 1 hour | simplest, last resort |
+| `tempmail_lol` | [tempmail.lol](https://tempmail.lol) | private | 1 hour | simplest, last resort; no attachments, and a mail with a text attachment arrives with the attachment as its body |
 | `mailgw` | [mail.gw](https://mail.gw) | private | like mail.tm | same software as mail.tm |
 | `maildrop` | [Maildrop](https://maildrop.cc) | **public** | 24 h idle | opt-in only (`-p maildrop`): anyone can read it; first mail may be delayed by greylisting |
 

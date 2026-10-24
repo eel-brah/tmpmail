@@ -46,6 +46,9 @@ pub enum Error {
     #[error("timed out after {0}s without a matching message")]
     Timeout(u64),
 
+    #[error("cancelled")]
+    Cancelled,
+
     #[error("{0}")]
     Usage(String),
 
@@ -66,6 +69,7 @@ impl Error {
             | Error::Unsupported { .. }
             | Error::AddressTaken(_)
             | Error::DomainUnavailable { .. } => 64,
+            Error::Cancelled => 130,
             Error::Other(_) => 1,
         }
     }
@@ -94,6 +98,7 @@ impl Error {
             Error::Expired(_) => "expired",
             Error::NoInbox => "no_inbox",
             Error::Timeout(_) => "timeout",
+            Error::Cancelled => "cancelled",
             Error::Usage(_) | Error::DomainUnavailable { .. } => "usage",
             Error::Other(_) => "error",
         }
