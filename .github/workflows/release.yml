@@ -1,6 +1,6 @@
 # Builds release archives on a `v*` tag and publishes them as a GitHub
 # release with SHA256SUMS. Every file gets a build provenance attestation,
-# checked with `gh attestation verify FILE --repo eel-brah/tmpmail`.
+# checked with `gh attestation verify FILE --repo qorvyx/tmpmail`.
 # Running it by hand (workflow_dispatch) only builds, as a dry run.
 name: release
 on:
@@ -86,3 +86,32 @@ jobs:
           gh release create "$GITHUB_REF_NAME" dist/*
           --repo "$GITHUB_REPOSITORY" --verify-tag --generate-notes
           --title "tmpmail ${GITHUB_REF_NAME#v}"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: SHA256SUMS
+          path: dist/SHA256SUMS
+
+  # Updates Formula/tmpmail.rb in qorvyx/homebrew-tap. Needs the
+  # HOMEBREW_TAP_TOKEN secret: a fine-grained token with contents write access
+  # to that repository only.
+  homebrew:
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          name: SHA256SUMS
+      - uses: actions/checkout@v7
+        with:
+          repository: qorvyx/homebrew-tap
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          path: tap
+      - run: |
+          scripts/homebrew-formula.sh "${GITHUB_REF_NAME#v}" SHA256SUMS > tap/Formula/tmpmail.rb
+          cd tap
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Formula/tmpmail.rb
+          git commit -m "tmpmail ${GITHUB_REF_NAME#v}"
+          git push

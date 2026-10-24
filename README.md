@@ -4,9 +4,9 @@ Disposable email for scripts, tests and AI agents. Make an address, sign up with
 get the verification code back in one line of shell. When one provider is down, tmpmail
 [moves on to the next](#choose-the-provider).
 
-[![CI](https://github.com/eel-brah/tmpmail/actions/workflows/ci.yml/badge.svg)](https://github.com/eel-brah/tmpmail/actions/workflows/ci.yml)
-[![Providers](https://github.com/eel-brah/tmpmail/actions/workflows/providers.yml/badge.svg)](https://github.com/eel-brah/tmpmail/actions/workflows/providers.yml)
-[![Release](https://img.shields.io/github/v/release/eel-brah/tmpmail)](https://github.com/eel-brah/tmpmail/releases/latest)
+[![CI](https://github.com/qorvyx/tmpmail/actions/workflows/ci.yml/badge.svg)](https://github.com/qorvyx/tmpmail/actions/workflows/ci.yml)
+[![Providers](https://github.com/qorvyx/tmpmail/actions/workflows/providers.yml/badge.svg)](https://github.com/qorvyx/tmpmail/actions/workflows/providers.yml)
+[![Release](https://img.shields.io/github/v/release/qorvyx/tmpmail)](https://github.com/qorvyx/tmpmail/releases/latest)
 [![crates.io](https://img.shields.io/crates/v/tmpmail)](https://crates.io/crates/tmpmail)
 [![License: GPL-3.0-or-later](https://img.shields.io/badge/license-GPL--3.0--or--later-blue)](LICENSE)
 
@@ -29,13 +29,22 @@ mail.tm's push stream. Recorded with [vhs](https://github.com/charmbracelet/vhs)
 cargo install tmpmail
 ```
 
-Or take a prebuilt binary from the [releases page](https://github.com/eel-brah/tmpmail/releases/latest):
+With [cargo-binstall](https://github.com/cargo-bins/cargo-binstall), `cargo binstall tmpmail`
+downloads the prebuilt binary instead of compiling. On macOS or Linux with Homebrew:
+
+```sh
+brew install qorvyx/tap/tmpmail
+```
+
+Use the full name: Homebrew's own `tmpmail` is a different project.
+
+Or take a prebuilt binary from the [releases page](https://github.com/qorvyx/tmpmail/releases/latest):
 Linux (x86_64, aarch64, fully static), macOS (Intel, Apple silicon) and Windows. Each
 release has `SHA256SUMS`, and every file carries a GitHub build attestation that proves it
 was built from this repository by the release workflow:
 
 ```sh
-gh attestation verify tmpmail-0.1.1-x86_64-unknown-linux-musl.tar.gz --repo eel-brah/tmpmail
+gh attestation verify tmpmail-0.1.2-x86_64-unknown-linux-musl.tar.gz --repo qorvyx/tmpmail
 ```
 
 Nothing else is needed at runtime. Optional extras: `wl-copy`, `xclip`, `xsel` or `pbcopy`
@@ -64,8 +73,8 @@ tmpmail --json ls | jq -r '.messages[0].subject'
 - name: Install tmpmail
   run: |
     mkdir -p ~/.local/bin
-    curl -sSfL https://github.com/eel-brah/tmpmail/releases/download/v0.1.1/tmpmail-0.1.1-x86_64-unknown-linux-musl.tar.gz \
-      | tar xz --strip-components=1 -C ~/.local/bin tmpmail-0.1.1-x86_64-unknown-linux-musl/tmpmail
+    curl -sSfL https://github.com/qorvyx/tmpmail/releases/download/v0.1.2/tmpmail-0.1.2-x86_64-unknown-linux-musl.tar.gz \
+      | tar xz --strip-components=1 -C ~/.local/bin tmpmail-0.1.2-x86_64-unknown-linux-musl/tmpmail
     echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
 - name: Sign-up test

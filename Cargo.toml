@@ -1,15 +1,24 @@
 [package]
 name = "tmpmail"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
 description = "Temporary email from the terminal: multiple providers, automatic fallback, wait/OTP/JSON for automation"
 license = "GPL-3.0-or-later"
 rust-version = "1.85"
-repository = "https://github.com/eel-brah/tmpmail"
+repository = "https://github.com/qorvyx/tmpmail"
 readme = "README.md"
 keywords = ["email", "temporary", "disposable", "otp", "cli"]
 categories = ["command-line-utilities", "email"]
 include = ["/src", "/docs", "/README.md", "/LICENSE", "/Cargo.lock"]
+
+# Lets `cargo binstall tmpmail` fetch the release archive instead of building.
+[package.metadata.binstall]
+pkg-url = "{ repo }/releases/download/v{ version }/{ name }-{ version }-{ target }{ archive-suffix }"
+bin-dir = "{ name }-{ version }-{ target }/{ bin }{ binary-ext }"
+pkg-fmt = "tgz"
+
+[package.metadata.binstall.overrides.x86_64-pc-windows-msvc]
+pkg-fmt = "zip"
 
 [dependencies]
 ammonia = "4.2.1"
