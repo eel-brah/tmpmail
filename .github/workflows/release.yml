@@ -1,0 +1,88 @@
+# Builds release archives on a `v*` tag and publishes them as a GitHub
+# release with SHA256SUMS. Every file gets a build provenance attestation,
+# checked with `gh attestation verify FILE --repo eel-brah/tmpmail`.
+# Running it by hand (workflow_dispatch) only builds, as a dry run.
+name: release
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: x86_64-unknown-linux-musl, os: ubuntu-latest }
+          - { target: aarch64-unknown-linux-musl, os: ubuntu-24.04-arm }
+          - { target: x86_64-apple-darwin, os: macos-latest }
+          - { target: aarch64-apple-darwin, os: macos-latest }
+          - { target: x86_64-pc-windows-msvc, os: windows-latest }
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - if: contains(matrix.target, 'musl')
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - run: cargo build --release --locked --target ${{ matrix.target }}
+      - name: Package
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          [ "$GITHUB_REF_TYPE" = tag ] || version="dev"
+          name="tmpmail-$version-$TARGET"
+          mkdir "$name"
+          cp README.md LICENSE "$name/"
+          if [[ "$TARGET" == *windows* ]]; then
+            cp "target/$TARGET/release/tmpmail.exe" "$name/"
+            7z a -bd "$name.zip" "$name" >/dev/null
+          else
+            cp "target/$TARGET/release/tmpmail" "$name/"
+            tar czf "$name.tar.gz" "$name"
+          fi
+          ls -l tmpmail-*.*
+      - uses: actions/attest-build-provenance@v4
+        if: github.ref_type == 'tag'
+        with:
+          subject-path: "tmpmail-*.*"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.target }}
+          path: |
+            tmpmail-*.tar.gz
+            tmpmail-*.zip
+          if-no-files-found: error
+
+  release:
+    needs: build
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
+      - run: cd dist && sha256sum tmpmail-* > SHA256SUMS && cat SHA256SUMS
+      - uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: dist/SHA256SUMS
+      - env:
+          GH_TOKEN: ${{ github.token }}
+        run: >
+          gh release create "$GITHUB_REF_NAME" dist/*
+          --repo "$GITHUB_REPOSITORY" --verify-tag --generate-notes
+          --title "tmpmail ${GITHUB_REF_NAME#v}"

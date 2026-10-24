@@ -5,6 +5,11 @@ edition = "2024"
 description = "Temporary email from the terminal: multiple providers, automatic fallback, wait/OTP/JSON for automation"
 license = "GPL-3.0-or-later"
 rust-version = "1.85"
+repository = "https://github.com/eel-brah/tmpmail"
+readme = "README.md"
+keywords = ["email", "temporary", "disposable", "otp", "cli"]
+categories = ["command-line-utilities", "email"]
+include = ["/src", "/docs", "/README.md", "/LICENSE", "/Cargo.lock"]
 
 [dependencies]
 ammonia = "4.2.1"

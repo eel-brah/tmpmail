@@ -11,8 +11,21 @@ Temporary email from the terminal. A Rust rewrite of the idea behind
 
 ## Install
 
+Prebuilt binaries for Linux (x86_64, aarch64; static), macOS (Intel, Apple silicon) and
+Windows are on the [releases page](https://github.com/eel-brah/tmpmail/releases), with
+`SHA256SUMS`. Each file carries a GitHub build attestation, so you can check it was built
+from this repo:
+
 ```sh
-cargo install --path .        # binary lands in ~/.cargo/bin/tmpmail
+gh attestation verify tmpmail-*.tar.gz --repo eel-brah/tmpmail
+sha256sum -c SHA256SUMS --ignore-missing
+```
+
+Or build it with Cargo:
+
+```sh
+cargo install tmpmail         # from crates.io
+cargo install --path .        # from a checkout; binary lands in ~/.cargo/bin/tmpmail
 ```
 
 Needs nothing else at runtime. Optional: `wl-copy`/`xclip`/`xsel`/`pbcopy` for `copy`,
