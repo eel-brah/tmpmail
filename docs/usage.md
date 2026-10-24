@@ -302,9 +302,11 @@ and drops the old inbox.
 Lists every provider with its position in the fallback order (`#1`… or `--` if not used
 by `new`). It also shows what each one supports:
 - `PUBLIC`: anyone can read the inbox
-- `custom-user`
+- `custom-user`: you can choose the part before `@` (`new -u`)
+- `domain`: you can choose the domain (`new -d`)
 - `attachments`
-- `delete`
+- `delete`: messages can be deleted
+- `login`: an existing inbox can be attached with `login`
 - how long addresses live
 
 | Option | Explanation |

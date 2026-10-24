@@ -35,7 +35,7 @@ release has `SHA256SUMS`, and every file carries a GitHub build attestation that
 was built from this repository by the release workflow:
 
 ```sh
-gh attestation verify tmpmail-0.1.0-x86_64-unknown-linux-musl.tar.gz --repo eel-brah/tmpmail
+gh attestation verify tmpmail-0.1.1-x86_64-unknown-linux-musl.tar.gz --repo eel-brah/tmpmail
 ```
 
 Nothing else is needed at runtime. Optional extras: `wl-copy`, `xclip`, `xsel` or `pbcopy`
@@ -64,8 +64,8 @@ tmpmail --json ls | jq -r '.messages[0].subject'
 - name: Install tmpmail
   run: |
     mkdir -p ~/.local/bin
-    curl -sSfL https://github.com/eel-brah/tmpmail/releases/download/v0.1.0/tmpmail-0.1.0-x86_64-unknown-linux-musl.tar.gz \
-      | tar xz --strip-components=1 -C ~/.local/bin tmpmail-0.1.0-x86_64-unknown-linux-musl/tmpmail
+    curl -sSfL https://github.com/eel-brah/tmpmail/releases/download/v0.1.1/tmpmail-0.1.1-x86_64-unknown-linux-musl.tar.gz \
+      | tar xz --strip-components=1 -C ~/.local/bin tmpmail-0.1.1-x86_64-unknown-linux-musl/tmpmail
     echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
 - name: Sign-up test

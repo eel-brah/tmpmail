@@ -1413,8 +1413,10 @@ impl App {
             let flags: Vec<&str> = [
                 (!caps.private, "PUBLIC"),
                 (caps.custom_user, "custom-user"),
+                (caps.choose_domain, "domain"),
                 (caps.attachments, "attachments"),
                 (caps.delete_message, "delete"),
+                (caps.login, "login"),
             ]
             .into_iter()
             .filter_map(|(on, flag)| on.then_some(flag))
