@@ -1,7 +1,8 @@
 # Daily check that the free providers still work, so a dead backend is
 # noticed before users hit it (the way 1secmail broke the original tmpmail).
-# A failure opens an issue labelled `provider-down` (or comments on the open
-# one); the next passing run closes it.
+# The run (and the badge) fails only when every provider is down. Any provider
+# failing opens an issue labelled `provider-down` (or comments on the open one);
+# the next run where all of them pass closes it.
 name: providers
 on:
   schedule:
@@ -20,15 +21,23 @@ jobs:
       # `shell: bash` adds pipefail, so tee doesn't hide a failure.
       - run: ./scripts/smoke.sh 2>&1 | tee smoke.log
         shell: bash
+      - name: Look for providers that are down
+        id: down
+        if: always()
+        run: |
+          if grep -q '^FAIL' smoke.log 2>/dev/null; then
+            grep '^FAIL' smoke.log | sed 's/^/::warning::/'
+            echo "any=true" >> "$GITHUB_OUTPUT"
+          fi
       - name: Open or update the provider-down issue
-        if: failure()
+        if: failure() || steps.down.outputs.any == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           gh label create provider-down --color B60205 \
             --description "Opened by the daily provider check" 2>/dev/null || true
-          body="$(printf 'The daily provider check failed: %s\n\n```\n%s\n```\n' \
+          body="$(printf 'The daily provider check found a provider down: %s\n\n```\n%s\n```\n' \
             "$RUN_URL" "$(tail -n 40 smoke.log 2>/dev/null)")"
           open="$(gh issue list --label provider-down --state open --json number --jq '.[0].number')"
           if [ -n "$open" ]; then
@@ -37,7 +46,7 @@ jobs:
             gh issue create --title "Provider check failing" --label provider-down --body "$body"
           fi
       - name: Close the provider-down issue
-        if: success()
+        if: success() && steps.down.outputs.any != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
