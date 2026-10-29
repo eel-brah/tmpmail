@@ -1,0 +1,2 @@
+# Shell scripts run under Git Bash on Windows CI, which chokes on CRLF.
+*.sh text eol=lf

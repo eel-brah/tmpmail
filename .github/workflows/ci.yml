@@ -3,7 +3,7 @@ on:
   push:
   pull_request:
 jobs:
-  test:
+  lint:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -20,4 +20,35 @@ jobs:
             echo "::error::README crates.io badge is not v$v"; exit 1; }
       - run: cargo fmt --check
       - run: cargo clippy --all-targets -- -D warnings
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
       - run: cargo test
+      - run: cargo build --release
+      # Runs the real binary without network, to catch crashes in path, state
+      # or terminal handling on each OS. Bash is Git Bash on Windows.
+      - name: Run the binary offline
+        shell: bash
+        run: |
+          bin="$PWD/target/release/tmpmail"
+          tmp="$(mktemp -d)"
+          if [ "$RUNNER_OS" = Windows ]; then
+            bin="$bin.exe"
+            tmp="$(cygpath -w "$tmp")"
+          fi
+          export TMPMAIL_STATE_DIR="$tmp/state" TMPMAIL_CONFIG="$tmp/no-config.toml"
+          set -x
+          "$bin" --version
+          "$bin" --help >/dev/null
+          "$bin" completions bash >/dev/null
+          "$bin" man -o "$tmp/man" >/dev/null
+          "$bin" providers
+          "$bin" inboxes
+          "$bin" --json inboxes

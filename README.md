@@ -51,6 +51,7 @@ Nothing else is needed at runtime. Optional extras: `wl-copy`, `xclip`, `xsel` o
 for `copy` (Windows has `clip.exe`), a browser for `read --html` (found through `xdg-open`,
 `open`, or Explorer on Windows), `notify-send` for `watch --notify` (macOS uses `osascript`,
 Windows a PowerShell toast), and `less` for long messages (without it, Windows prints them).
+CI runs the tests on Linux, macOS and Windows.
 
 ## Use it
 
@@ -88,7 +89,8 @@ tmpmail --json ls | jq -r '.messages[0].subject'
 ```
 
 The [daily provider check](.github/workflows/providers.yml) creates and lists inboxes from
-GitHub's runners, so the free providers are known to work from CI.
+GitHub's Linux, macOS and Windows runners, so the free providers are known to work from CI.
+Its badge turns red only when every provider is down from one of them.
 
 ### With an AI agent
 
