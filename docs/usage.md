@@ -49,8 +49,8 @@ ignore case. Plain words work: `--from github` matches `GitHub <noreply@github.c
 | `--inbox ADDR` | `-i` | Act on this inbox instead of the active one. Example: `tmpmail -i github ls`. Also settable with `TMPMAIL_INBOX`. |
 | `--quiet` | `-q` | Print only the essential result, without hints or status lines. Example: `addr=$(tmpmail new -q)`. |
 | `--no-color` | | No bold or dim text. Colors are also off when output is piped or `NO_COLOR` is set. |
-| `--browser CMD` | `-b` | Program used by `read --html` and `links --open`, e.g. `-b firefox` or `-b w3m`. Default: `$BROWSER`, then `xdg-open`/`open`. |
-| `--clipboard-cmd CMD` | | Program that receives the address on stdin for `copy` and `--copy`. Default: auto-detects `wl-copy` (Wayland), `xclip`/`xsel` (X11), `pbcopy` (macOS). |
+| `--browser CMD` | `-b` | Program used by `read --html` and `links --open`, e.g. `-b firefox` or `-b w3m`. Default: `$BROWSER`, then the system opener: `xdg-open` (Linux), `open` (macOS), `wslview` (WSL), or Explorer's default handler on Windows. |
+| `--clipboard-cmd CMD` | | Program that receives the address on stdin for `copy` and `--copy`. Default: auto-detects `wl-copy` (Wayland), `xclip`/`xsel` (X11), `pbcopy` (macOS), `clip.exe` (Windows, WSL), `termux-clipboard-set` (Termux). |
 | `--help` | `-h` | Help for tmpmail or for one command (`tmpmail wait -h`). |
 | `--version` | `-V` | Print the version. |
 
@@ -99,7 +99,7 @@ Prints the headers and body as text. Alias: `show`. Old flags: `-r` (newest), `t
 | `--html` | | Open the HTML version in your browser. It is sanitized first: no scripts, forms or frames, links can't track you back. |
 | `--images` | | With `--html`: also load remote images. Off by default because they are often tracking pixels that tell the sender you opened the mail. |
 | `--raw` | | Print the full raw email source (headers + MIME). Useful for debugging or `> mail.eml`. |
-| `--no-pager` | | Print a long message straight to the terminal. By default a message taller than the terminal opens in a pager: `pager` from the config, else `$PAGER`, else `less`. |
+| `--no-pager` | | Print a long message straight to the terminal. By default a message taller than the terminal opens in a pager: `pager` from the config, else `$PAGER`, else `less`. On Windows, if neither is set and `less` isn't installed, the message is printed instead. |
 
 ### `wait`: wait for a message
 
@@ -169,7 +169,7 @@ there are shown dimmed at start. With `--json` it prints one JSON object per lin
 | Option | Short | Explanation |
 |---|---|---|
 | `--all-inboxes` | `-a` | Watch **every** saved inbox; each line starts with the address that received it. |
-| `--notify` | `-n` | Also show a desktop notification for each new message. |
+| `--notify` | `-n` | Also show a desktop notification for each new message, through `notify-send` (Linux), `osascript` (macOS) or a PowerShell toast (Windows). Nothing is shown if none is available. |
 | `--interval SECONDS` | | Time between checks. Default 5. Push applies as in `wait`. |
 | `--rotate PERIOD` | | Switch to a fresh address this often, like `rotate` does: `90s`, `30m`, `2h`, `1h30m` (at least `1m`). The new address is printed (and notified with `-n`), becomes active, and is watched from then on. Can't be combined with `-a`. |
 | `--keep` | | With `--rotate`: keep the old inboxes instead of dropping them. |
@@ -426,7 +426,7 @@ These still work when used as the **first** argument, so old scripts keep runnin
 | `TMPMAIL_CONFIG` | Config file path. Default `~/.config/tmpmail/config.toml`. |
 | `TMPMAIL_DROPMAIL_TOKEN` | Your own DropMail API token, if DropMail asks for a captcha. |
 | `TMPMAIL_PUSH` | `0` turns off push in `wait`/`watch` (see [`wait`](#wait-wait-for-a-message)). Default `1`. |
-| `PAGER` | Pager for long messages in `read`, unless `pager` is set in the config. Default `less`. |
+| `PAGER` | Pager for long messages in `read`, unless `pager` is set in the config. Default `less` (on Windows, printing directly when `less` isn't installed). |
 | `TMPMAIL_HTTP_TIMEOUT` | Seconds before a single request to a provider gives up. Default 20. |
 | `NO_COLOR` | Disable colors. |
 

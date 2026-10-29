@@ -48,7 +48,9 @@ gh attestation verify tmpmail-0.1.2-x86_64-unknown-linux-musl.tar.gz --repo qorv
 ```
 
 Nothing else is needed at runtime. Optional extras: `wl-copy`, `xclip`, `xsel` or `pbcopy`
-for `copy`, a browser for `read --html`, `notify-send` for `watch --notify`.
+for `copy` (Windows has `clip.exe`), a browser for `read --html` (found through `xdg-open`,
+`open`, or Explorer on Windows), `notify-send` for `watch --notify` (macOS uses `osascript`,
+Windows a PowerShell toast), and `less` for long messages (without it, Windows prints them).
 
 ## Use it
 
