@@ -91,6 +91,22 @@ impl App {
         })
     }
 
+    /// An app with the default config and an empty state kept in `dir`,
+    /// for tests that must not read the user's files.
+    #[cfg(test)]
+    pub(crate) fn for_test(dir: std::path::PathBuf) -> Self {
+        App {
+            global: Global::default(),
+            config: Config::default(),
+            store: Store::new(dir),
+            state: State::default(),
+            color: false,
+            providers: HashMap::new(),
+            log: None,
+            cancel: None,
+        }
+    }
+
     /// Sends notes and warnings to `log` instead of printing them.
     pub fn log_to(&mut self, log: Sender<String>) {
         self.log = Some(log);

@@ -176,6 +176,7 @@ TMPMAIL_PROVIDER=dropmail,mailtm tmpmail new
 ```
 
 The order can also be set for good in the [config file](#configuration).
+In the TUI, `N` picks the provider.
 
 ### Read your mail
 

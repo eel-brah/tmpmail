@@ -197,6 +197,7 @@ verification code, the preview shows it highlighted at the top and `y` copies it
 | `↑` `↓` (`j` `k`), `g` `G` | Move in a list, or scroll the message |
 | `PgUp` `PgDn`, `Space` | Scroll the message |
 | `n` | Create an inbox (with the same fallback as `new`) |
+| `N` | Pick a provider from a list and create an inbox there (no fallback, like `new -p`). Maildrop is marked `public` |
 | `a` | Make the selected inbox the active one |
 | `c` | Copy the selected inbox's address |
 | `D` | Delete the selected inbox (asks first) |

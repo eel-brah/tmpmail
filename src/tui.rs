@@ -64,10 +64,17 @@ pub fn run(app: &mut App) -> Result<()> {
 
 enum Req {
     Refresh(String),
-    Open { address: String, id: String },
-    Create,
+    Open {
+        address: String,
+        id: String,
+    },
+    /// A new inbox at this provider only, or with the fallback order.
+    Create(Option<String>),
     Use(String),
-    DeleteMessage { address: String, id: String },
+    DeleteMessage {
+        address: String,
+        id: String,
+    },
     Drop(String),
 }
 
@@ -196,8 +203,8 @@ fn handle(
             let _ = tx.send(Ev::Opened { address, result });
             false
         }
-        Req::Create => {
-            match app.create_with_fallback(None, None, &CreateOpts::default()) {
+        Req::Create(provider) => {
+            match app.create_with_fallback(provider.as_deref(), None, &CreateOpts::default()) {
                 Ok(inbox) => {
                     let address = inbox.address.clone();
                     match app.store.update(|s| s.add(inbox)) {
@@ -308,6 +315,8 @@ struct Ui {
     status: Option<(String, Instant)>,
     confirm: Option<Confirm>,
     help: bool,
+    /// The provider picker (`N`), its cursor on a row of `provider::all()`.
+    picker: Option<ListState>,
     /// Select this inbox once the worker reports it (after `n`).
     pending_select: Option<String>,
     quit: bool,
@@ -332,6 +341,7 @@ impl Ui {
             status: None,
             confirm: None,
             help: false,
+            picker: None,
             pending_select: None,
             quit: false,
         }
@@ -580,6 +590,10 @@ impl Ui {
             }
             return;
         }
+        if self.picker.is_some() {
+            self.picker_key(key.code);
+            return;
+        }
         if self.help {
             self.help = false;
             return;
@@ -626,7 +640,13 @@ impl Ui {
             KeyCode::End | KeyCode::Char('G') => self.jump(true),
             KeyCode::Char('n') => {
                 self.say("creating an inbox...");
-                self.send(Req::Create);
+                self.send(Req::Create(None));
+            }
+            KeyCode::Char('N') => {
+                // Start on the provider `n` would try first.
+                let first = app.config.provider_order().into_iter().next();
+                let n = first.and_then(|id| crate::provider::all().position(|p| p == id));
+                self.open_picker(n.unwrap_or(0));
             }
             KeyCode::Char('a') => {
                 if let Some(a) = self.address() {
@@ -684,6 +704,36 @@ impl Ui {
                 if let Some(a) = self.address() {
                     self.confirm = Some(Confirm::Drop(a));
                 }
+            }
+            _ => {}
+        }
+    }
+
+    fn open_picker(&mut self, row: usize) {
+        self.picker = Some(ListState::default().with_selected(Some(row)));
+    }
+
+    /// Keys while the provider picker is open; it takes them all.
+    fn picker_key(&mut self, code: KeyCode) {
+        let Some(state) = self.picker.as_mut() else {
+            return;
+        };
+        let last = crate::provider::all().count() - 1;
+        let n = state.selected().unwrap_or(0);
+        match code {
+            KeyCode::Esc | KeyCode::Char('q') => self.picker = None,
+            KeyCode::Down | KeyCode::Char('j') => state.select(Some((n + 1).min(last))),
+            KeyCode::Up | KeyCode::Char('k') => state.select(Some(n.saturating_sub(1))),
+            KeyCode::Home | KeyCode::Char('g') => state.select(Some(0)),
+            KeyCode::End | KeyCode::Char('G') => state.select(Some(last)),
+            KeyCode::Enter => {
+                self.picker = None;
+                let Some(id) = crate::provider::all().nth(n) else {
+                    return;
+                };
+                let name = crate::provider::get(id).map_or(id, |p| p.name());
+                self.say(format!("creating an inbox at {name}..."));
+                self.send(Req::Create(Some(id.to_string())));
             }
             _ => {}
         }
@@ -774,6 +824,9 @@ impl Ui {
         self.draw_footer(f, footer);
         if self.help {
             draw_help(f);
+        }
+        if let Some(state) = &mut self.picker {
+            draw_picker(f, state);
         }
     }
 
@@ -1002,7 +1055,7 @@ impl Ui {
         }
         let keys: &[(&str, &str)] = match self.focus {
             Focus::Inboxes => &[
-                ("n", "new"),
+                ("n/N", "new"),
                 ("c", "copy"),
                 ("a", "make active"),
                 ("D", "delete inbox"),
@@ -1113,6 +1166,7 @@ fn draw_help(f: &mut Frame) {
         ("↑ ↓ / j k", "move, or scroll the message"),
         ("PgUp PgDn", "scroll the message"),
         ("n", "create a new inbox"),
+        ("N", "create an inbox at a chosen provider"),
         ("a", "make the selected inbox the active one"),
         ("c", "copy the inbox address"),
         ("D", "delete the inbox"),
@@ -1150,6 +1204,55 @@ fn draw_help(f: &mut Frame) {
         ),
         rect,
     );
+}
+
+/// The provider picker: one row per provider, with its lifetime, and a
+/// warning on those whose inboxes anyone can read.
+fn draw_picker(f: &mut Frame, state: &mut ListState) {
+    let rows: Vec<(&str, &str, bool)> = crate::provider::all()
+        .filter_map(|id| crate::provider::get(id).ok())
+        .map(|p| (p.name(), p.caps().lifetime, p.caps().private))
+        .collect();
+    let name_w = rows.iter().map(|r| r.0.len()).max().unwrap_or(0);
+    let items: Vec<ListItem> = rows
+        .iter()
+        .map(|(name, lifetime, private)| {
+            let mut spans = vec![
+                Span::styled(format!(" {name:<name_w$}  "), Style::new().bold()),
+                Span::styled(*lifetime, Style::new().dim()),
+            ];
+            if !private {
+                spans.push(Span::styled(
+                    "  public",
+                    Style::new().fg(Color::Yellow).dim(),
+                ));
+            }
+            ListItem::new(Line::from(spans))
+        })
+        .collect();
+    let widest = rows
+        .iter()
+        .map(|(_, l, private)| name_w + 3 + l.chars().count() + if *private { 0 } else { 8 })
+        .max()
+        .unwrap_or(0);
+    let area = f.area();
+    let w = (widest as u16 + 3).min(area.width);
+    let h = (rows.len() as u16 + 2).min(area.height);
+    let rect = Rect::new(
+        area.x + (area.width - w) / 2,
+        area.y + (area.height - h) / 2,
+        w,
+        h,
+    );
+    f.render_widget(Clear, rect);
+    let list = List::new(items)
+        .block(
+            Block::bordered()
+                .title(" Provider ")
+                .border_style(Style::new().fg(Color::Cyan)),
+        )
+        .highlight_style(Style::new().add_modifier(Modifier::REVERSED));
+    f.render_stateful_widget(list, rect, state);
 }
 
 #[cfg(test)]
@@ -1225,5 +1328,63 @@ mod tests {
         assert!(ui.status.as_ref().unwrap().0.contains("Your code"));
         // The cursor stays on the message it was on.
         assert_eq!(ui.summary().unwrap().id, "1");
+    }
+
+    fn press(ui: &mut Ui, app: &mut App, code: KeyCode) {
+        ui.key(KeyEvent::new(code, KeyModifiers::NONE), app);
+    }
+
+    #[test]
+    fn the_provider_picker_closes_without_quitting() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = App::for_test(dir.path().to_path_buf());
+        let (tx, rx) = channel();
+        let mut ui = Ui::new(tx);
+        press(&mut ui, &mut app, KeyCode::Char('N'));
+        // The default order starts with mailtm, the first row.
+        assert_eq!(ui.picker.as_ref().unwrap().selected(), Some(0));
+        press(&mut ui, &mut app, KeyCode::Char('x'));
+        assert!(ui.picker.is_some(), "other keys are ignored");
+        press(&mut ui, &mut app, KeyCode::Esc);
+        assert!(ui.picker.is_none());
+        assert!(!ui.quit);
+
+        press(&mut ui, &mut app, KeyCode::Char('N'));
+        press(&mut ui, &mut app, KeyCode::Char('q'));
+        assert!(ui.picker.is_none());
+        assert!(!ui.quit, "q closes the picker, not the app");
+        assert!(rx.try_recv().is_err(), "nothing was requested");
+    }
+
+    #[test]
+    fn the_provider_picker_creates_at_the_chosen_provider() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = App::for_test(dir.path().to_path_buf());
+        let (tx, rx) = channel();
+        let mut ui = Ui::new(tx);
+        press(&mut ui, &mut app, KeyCode::Char('N'));
+        press(&mut ui, &mut app, KeyCode::Down);
+        press(&mut ui, &mut app, KeyCode::Enter);
+        assert!(ui.picker.is_none());
+        let second = crate::provider::all().nth(1).unwrap();
+        assert!(matches!(rx.try_recv(), Ok(Req::Create(Some(id))) if id == second));
+        assert!(
+            ui.status
+                .as_ref()
+                .unwrap()
+                .0
+                .starts_with("creating an inbox at ")
+        );
+
+        // `G` goes to the last row and the cursor stops there.
+        press(&mut ui, &mut app, KeyCode::Char('N'));
+        press(&mut ui, &mut app, KeyCode::Char('G'));
+        press(&mut ui, &mut app, KeyCode::Char('j'));
+        press(&mut ui, &mut app, KeyCode::Enter);
+        let last = crate::provider::all().last().unwrap();
+        assert!(matches!(rx.try_recv(), Ok(Req::Create(Some(id))) if id == last));
+
+        press(&mut ui, &mut app, KeyCode::Char('n'));
+        assert!(matches!(rx.try_recv(), Ok(Req::Create(None))));
     }
 }
