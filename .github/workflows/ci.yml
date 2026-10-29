@@ -11,6 +11,13 @@ jobs:
         with:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
+      # The crates.io badge is static (the live one gets rate limited), so it
+      # must be bumped with the version.
+      - name: Check the README badge matches Cargo.toml
+        run: |
+          v="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n1)"
+          grep -Fq "badge/crates.io-v$v-" README.md || {
+            echo "::error::README crates.io badge is not v$v"; exit 1; }
       - run: cargo fmt --check
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test
