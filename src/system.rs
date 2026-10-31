@@ -162,6 +162,7 @@ fn explorer_arg(target: &str) -> anyhow::Result<String> {
 
 /// Columns and rows of the terminal on stdout, else `$COLUMNS` and `$LINES`
 /// (rows 0 when unknown).
+#[cfg(feature = "cli")]
 pub fn term_size() -> Option<(usize, usize)> {
     use std::io::IsTerminal;
     // crossterm asks the terminal itself (/dev/tty, or the Windows console),

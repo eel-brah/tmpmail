@@ -45,33 +45,10 @@ pub fn body_text(text: Option<&str>, html: Option<&str>, width: usize) -> String
 }
 
 /// Sanitized standalone HTML document for viewing a message in a browser:
-/// scripts, forms and frames removed, links marked noopener, and remote
-/// images (tracking pixels) dropped unless `allow_remote_images`.
+/// [`sanitize_mail_html`]'s body in a document whose meta CSP blocks scripts
+/// and (unless `allow_remote_images`) remote images, with no referrer.
 pub fn safe_html_document(subject: &str, html: &str, allow_remote_images: bool) -> String {
-    let mut builder = ammonia::Builder::default();
-    builder
-        .add_generic_attributes(["style", "align", "bgcolor", "width", "height"])
-        .add_tag_attributes("td", ["valign", "colspan", "rowspan"])
-        .add_tag_attributes("table", ["cellpadding", "cellspacing", "border"])
-        .link_rel(Some("noopener noreferrer nofollow"))
-        .url_schemes(HashSet::from(["http", "https", "mailto", "cid", "data"]))
-        .attribute_filter(move |element, attribute, value| {
-            if element == "img" && attribute == "src" {
-                let remote = !(value.starts_with("data:") || value.starts_with("cid:"));
-                if remote && !allow_remote_images {
-                    return None;
-                }
-            }
-            // Inline styles can fetch remote resources through url(...).
-            if attribute == "style"
-                && value.to_ascii_lowercase().contains("url(")
-                && !allow_remote_images
-            {
-                return None;
-            }
-            Some(Cow::Borrowed(value))
-        });
-    let body = builder.clean(html).to_string();
+    let body = sanitize_mail_html(html, allow_remote_images, None);
     let img_src = if allow_remote_images {
         "data: cid: https: http:"
     } else {
@@ -84,6 +61,67 @@ pub fn safe_html_document(subject: &str, html: &str, allow_remote_images: bool) 
          <title>{}</title></head><body>\n{body}\n</body></html>\n",
         escape_html(subject)
     )
+}
+
+/// How the desktop app shows a mail body, where it differs from a browser
+/// file: links open as popups (which the app hands to the system browser),
+/// and `cid:` images point at the app's mail scheme.
+pub struct Frame<'a> {
+    /// Prefix for inline images: `cid:ID` becomes `{cid_base}{ID}` with the
+    /// id percent-encoded.
+    pub cid_base: &'a str,
+}
+
+/// Mail HTML with scripts, forms, frames and event handlers removed, links
+/// marked noopener, only http/https/mailto/cid/data URLs, and remote images
+/// (tracking pixels, also through `url(...)` in styles) dropped unless
+/// `allow_remote_images`. `<style>` blocks are dropped too. With a `frame`,
+/// links get `target="_blank"` and `cid:` images are rewritten.
+pub fn sanitize_mail_html(html: &str, allow_remote_images: bool, frame: Option<&Frame>) -> String {
+    let mut builder = ammonia::Builder::default();
+    builder
+        .add_generic_attributes(["style", "align", "bgcolor", "width", "height"])
+        .add_tag_attributes("td", ["valign", "colspan", "rowspan"])
+        .add_tag_attributes("table", ["cellpadding", "cellspacing", "border"])
+        .link_rel(Some("noopener noreferrer nofollow"))
+        .url_schemes(HashSet::from(["http", "https", "mailto", "cid", "data"]));
+    if frame.is_some() {
+        builder.set_tag_attribute_value("a", "target", "_blank");
+    }
+    let cid_base = frame.map(|f| f.cid_base.to_string());
+    builder.attribute_filter(move |element, attribute, value| {
+        if element == "img" && attribute == "src" {
+            if let (Some(base), Some(id)) = (&cid_base, value.strip_prefix("cid:")) {
+                return Some(Cow::Owned(format!("{base}{}", percent_encode(id))));
+            }
+            let remote = !(value.starts_with("data:") || value.starts_with("cid:"));
+            if remote && !allow_remote_images {
+                return None;
+            }
+        }
+        // Inline styles can fetch remote resources through url(...).
+        if attribute == "style"
+            && value.to_ascii_lowercase().contains("url(")
+            && !allow_remote_images
+        {
+            return None;
+        }
+        Some(Cow::Borrowed(value))
+    });
+    builder.clean(html).to_string()
+}
+
+/// Percent-encodes everything but unreserved URL characters.
+fn percent_encode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'~') {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
 }
 
 pub fn escape_html(s: &str) -> String {
@@ -145,6 +183,37 @@ mod tests {
 
         let with_images = safe_html_document("S", html, true);
         assert!(with_images.contains("track.example"));
+    }
+
+    /// `read --html` output from before the sanitizer was split out of
+    /// `safe_html_document`: it must not change by a byte.
+    #[test]
+    fn safe_html_document_is_unchanged() {
+        let html = r#"<p onclick="x()" style="color:red">Hi<script>alert(1)</script></p>
+            <style>p{color:blue}</style><img src="https://track.example/p.gif" alt="t">
+            <img src="cid:logo@x"><a href="https://example.com/verify" target="_top">go</a>
+            <a href="javascript:alert(1)">js</a><form><input></form>
+            <table cellpadding="2"><tr><td valign="top" colspan="2">c</td></tr></table>
+            <div style="background:url(https://t.example/x)">bg</div>"#;
+        let expected = "<!doctype html>\n<html><head><meta charset=\"utf-8\">\n<meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; img-src data: cid:; style-src 'unsafe-inline'\">\n<meta name=\"referrer\" content=\"no-referrer\">\n<title>S &lt;x&gt;</title></head><body>\n<p style=\"color:red\">Hi</p>\n            <img alt=\"t\">\n            <img src=\"cid:logo@x\"><a href=\"https://example.com/verify\" rel=\"noopener noreferrer nofollow\">go</a>\n            <a rel=\"noopener noreferrer nofollow\">js</a>\n            <table cellpadding=\"2\"><tbody><tr><td valign=\"top\" colspan=\"2\">c</td></tr></tbody></table>\n            <div>bg</div>\n</body></html>\n";
+        assert_eq!(safe_html_document("S <x>", html, false), expected);
+        let with_images = "<!doctype html>\n<html><head><meta charset=\"utf-8\">\n<meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; img-src data: cid: https: http:; style-src 'unsafe-inline'\">\n<meta name=\"referrer\" content=\"no-referrer\">\n<title>S &lt;x&gt;</title></head><body>\n<p style=\"color:red\">Hi</p>\n            <img src=\"https://track.example/p.gif\" alt=\"t\">\n            <img src=\"cid:logo@x\"><a href=\"https://example.com/verify\" rel=\"noopener noreferrer nofollow\">go</a>\n            <a rel=\"noopener noreferrer nofollow\">js</a>\n            <table cellpadding=\"2\"><tbody><tr><td valign=\"top\" colspan=\"2\">c</td></tr></tbody></table>\n            <div style=\"background:url(https://t.example/x)\">bg</div>\n</body></html>\n";
+        assert_eq!(safe_html_document("S <x>", html, true), with_images);
+    }
+
+    #[test]
+    fn frame_mode_opens_links_in_popups_and_serves_cid_images() {
+        let html = r#"<a href="https://example.com/">go</a><img src="cid:logo@x y">"#;
+        let frame = Frame {
+            cid_base: "tmpmail-mail://localhost/m1/cid/",
+        };
+        let body = sanitize_mail_html(html, false, Some(&frame));
+        assert!(body.contains(r#"target="_blank""#), "{body}");
+        assert!(
+            body.contains(r#"src="tmpmail-mail://localhost/m1/cid/logo%40x%20y""#),
+            "{body}"
+        );
+        assert!(!sanitize_mail_html(html, false, None).contains("target"));
     }
 
     #[test]

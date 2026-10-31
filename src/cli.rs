@@ -25,32 +25,7 @@ pub struct Cli {
     pub command: Command,
 }
 
-#[derive(Debug, Clone, Default, Args)]
-pub struct Global {
-    /// Machine-readable JSON output
-    #[arg(long, global = true)]
-    pub json: bool,
-
-    /// Inbox to use (address, local part or label); defaults to the active one
-    #[arg(long, short = 'i', global = true, env = "TMPMAIL_INBOX")]
-    pub inbox: Option<String>,
-
-    /// Disable colors (also honours NO_COLOR)
-    #[arg(long, global = true)]
-    pub no_color: bool,
-
-    /// Only print essential output
-    #[arg(long, short, global = true)]
-    pub quiet: bool,
-
-    /// Browser command for HTML and links (default: $BROWSER, xdg-open, open)
-    #[arg(long, short = 'b', global = true)]
-    pub browser: Option<String>,
-
-    /// Clipboard command (default: auto-detect wl-copy, xclip, xsel, pbcopy)
-    #[arg(long, global = true)]
-    pub clipboard_cmd: Option<String>,
-}
+pub use crate::app::Global;
 
 #[derive(Debug, Subcommand)]
 pub enum Command {

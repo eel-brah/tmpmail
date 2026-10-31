@@ -20,6 +20,8 @@ jobs:
             echo "::error::README crates.io badge is not v$v"; exit 1; }
       - run: cargo fmt --check
       - run: cargo clippy --all-targets -- -D warnings
+      # The lib as the desktop app uses it: no clap, ratatui or qrcode.
+      - run: cargo clippy --lib --no-default-features -- -D warnings
   test:
     strategy:
       fail-fast: false

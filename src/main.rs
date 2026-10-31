@@ -1,21 +1,8 @@
-mod app;
-mod cli;
-mod config;
-mod error;
-mod extract;
-mod http;
-mod mcp;
-mod provider;
-mod push;
-mod render;
-mod store;
-mod system;
-mod tui;
-
 use clap::{CommandFactory, Parser};
 
-use crate::cli::{Cli, Command};
-use crate::error::Error;
+use tmpmail::cli::{self, Cli, Command};
+use tmpmail::error::Error;
+use tmpmail::{app, render};
 
 fn main() {
     // Exit quietly when piped into `head` and the like, instead of panicking
