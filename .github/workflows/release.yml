@@ -2,6 +2,7 @@
 # release with SHA256SUMS. Every file gets a build provenance attestation,
 # checked with `gh attestation verify FILE --repo qorvyx/tmpmail`.
 # Running it by hand (workflow_dispatch) only builds, as a dry run.
+# `gui-v*` tags (the desktop app) don't match `v*`, so they don't run it.
 name: release
 on:
   push:
@@ -10,7 +11,35 @@ on:
 permissions:
   contents: read
 jobs:
+  # Stops before any build if the tag isn't the crate's version (`v0.3.0`
+  # for `version = "0.3.0"` in the root Cargo.toml), or if Cargo.lock is
+  # stale (every build runs `--locked`).
+  version:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Tag matches Cargo.toml
+        shell: bash
+        run: |
+          cargo metadata --locked --format-version 1 >/dev/null
+          crate=$(cargo metadata --no-deps --format-version 1 \
+            | jq -r '.packages[] | select(.name == "tmpmail") | .version')
+          if [ -z "$crate" ]; then
+            echo "::error::no tmpmail package in the root Cargo.toml"
+            exit 1
+          fi
+          if [ "$GITHUB_REF_TYPE" != tag ]; then
+            echo "Not a tag; Cargo.toml says $crate"
+            exit 0
+          fi
+          tag="${GITHUB_REF_NAME#v}"
+          if [ "$tag" != "$crate" ]; then
+            echo "::error::tag $GITHUB_REF_NAME doesn't match Cargo.toml version $crate"
+            exit 1
+          fi
+          echo "Tag $GITHUB_REF_NAME matches Cargo.toml"
   build:
+    needs: version
     strategy:
       fail-fast: false
       matrix:
