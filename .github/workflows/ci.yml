@@ -28,12 +28,23 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
+    # The release build's static C runtime flag (see release.yml), so the
+    # Windows tests and import check see tmpmail.exe linked as it ships. Only
+    # applies to the windows-msvc target. Without --target it also reaches
+    # build scripts, which is harmless. A RUSTFLAGS variable would override it;
+    # the import check then fails.
+    env:
+      CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS: -C target-feature=+crt-static
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo test
       - run: cargo build --release
+      - name: Check tmpmail.exe needs no C runtime DLLs
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./scripts/check-windows-imports.ps1 target/release/tmpmail.exe
       # Runs the real binary without network, to catch crashes in path, state
       # or terminal handling on each OS. Bash is Git Bash on Windows.
       - name: Run the binary offline

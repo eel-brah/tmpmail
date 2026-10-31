@@ -61,7 +61,18 @@ jobs:
           targets: ${{ matrix.target }}
       - if: contains(matrix.target, 'musl')
         run: sudo apt-get update && sudo apt-get install -y musl-tools
+      # Links the C runtime into tmpmail.exe, so it starts on a Windows without
+      # the Visual C++ Redistributable. Target-scoped, so the other matrix
+      # entries (and crates.io builds) are unaffected; set here rather than in
+      # a repo .cargo/config.toml so local builds aren't changed either. A
+      # RUSTFLAGS variable would override it; the import check then fails.
       - run: cargo build --release --locked --target ${{ matrix.target }}
+        env:
+          CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS: -C target-feature=+crt-static
+      - name: Check tmpmail.exe needs no C runtime DLLs
+        if: contains(matrix.target, 'windows')
+        shell: pwsh
+        run: ./scripts/check-windows-imports.ps1 target/${{ matrix.target }}/release/tmpmail.exe
       - name: Package
         shell: bash
         env:

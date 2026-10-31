@@ -41,9 +41,10 @@ brew install qorvyx/tap/tmpmail
 Use the full name: Homebrew's own `tmpmail` is a different project.
 
 Or take a prebuilt binary from the [releases page](https://github.com/qorvyx/tmpmail/releases/latest):
-Linux (x86_64, aarch64, fully static), macOS (Intel, Apple silicon) and Windows. Each
-release has `SHA256SUMS`, and every file carries a GitHub build attestation that proves it
-was built from this repository by the release workflow:
+Linux (x86_64, aarch64, fully static), macOS (Intel, Apple silicon) and Windows (x64, C
+runtime linked in, so no Visual C++ Redistributable needed since 0.3.1). Each release has
+`SHA256SUMS`, and every file carries a GitHub build attestation that proves it was built
+from this repository by the release workflow:
 
 ```sh
 gh attestation verify tmpmail-0.3.0-x86_64-unknown-linux-musl.tar.gz --repo qorvyx/tmpmail
