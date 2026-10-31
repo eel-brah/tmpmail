@@ -218,7 +218,10 @@ in `tauri.conf.json`:
 - **Windows:** an NSIS installer only (no MSI), per user (no admin prompt), with the
   WebView2 bootstrapper that downloads WebView2 if it's missing. Its hooks
   (`src-tauri/packaging/windows/hooks.nsh`) register the `tmpmail-desktop:` link scheme for
-  notification clicks under `HKCU\Software\Classes` and remove it on uninstall.
+  notification clicks under `HKCU\Software\Classes` and remove it on uninstall. The installer
+  and uninstaller show the app icon and tmpmail's own header and welcome-page artwork
+  (`src-tauri/packaging/windows/nsis-*.bmp`, drawn from `assets/logo.svg` by
+  `scripts/nsis-artwork.sh`).
 - **Release builds contain no probe**: `probe.rs` and everything that calls it are
   `#[cfg(debug_assertions)]`, and the release workflow fails if the binary contains
   `TMPMAIL_GUI_PROBE`. The caller check and the closed `postMessage` route are in every
