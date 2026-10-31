@@ -50,7 +50,11 @@ preview on `gui-v*` tags; install steps are in the [main README](../README.md#de
   the window's user time), so KWin's focus-stealing prevention lets the window come to the
   front instead of only flashing its taskbar entry. The token is taken only from the server
   that showed the notification, only as printable ASCII of at most 512 bytes, and used
-  once; without one (an older server) the window is raised as before. The notifications
+  once; without one (an older server) the window is raised as before. The `default`
+  action (a click on the notification) is labeled "Open": KDE's notification history shows
+  it as a button (Plasma's own label "View" when the app gives none), since a click on a
+  history entry's body does nothing there; GNOME doesn't show it, and servers that list
+  every action (dunst's menu, for one) list "Open". The notifications
   are sent as `tmpmail`, with the `desktop-entry` hint `tmpmail` (the installed
   `tmpmail.desktop`), so KDE and GNOME label them "tmpmail" with its icon and file them
   under the app's own notification settings (0.1.1 sent the binary's name, `tmpmail-gui`;

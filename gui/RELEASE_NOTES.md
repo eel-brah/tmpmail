@@ -19,6 +19,8 @@ has only been checked by the automated security probe. Please report what breaks
   Copy, since Ctrl+C goes to the app.
 - **Linux: notifications are labeled "tmpmail"**, not "tmpmail-gui", and KDE and GNOME
   list them under the app's notification settings.
+- **Linux: in KDE's notification history, the button that opens the message reads
+  "Open"** (it was Plasma's default, "View").
 - **Linux on Wayland: the window fits the screen.** It opened at 1240×780 whatever the
   screen, so on a 1280×800 screen its bottom (Settings' Save button, the toasts) was behind
   KDE's panel: GTK can't read the work area there. It now leaves room for the panels.

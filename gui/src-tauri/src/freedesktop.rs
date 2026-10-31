@@ -54,7 +54,9 @@ pub struct Request {
     pub icon: &'static str,
     pub summary: String,
     pub body: String,
-    /// Pairs of action id and label: `default` is a click on the notification.
+    /// Pairs of action id and label: `default` is a click on the
+    /// notification. Its label shows where a server makes it a button: KDE's
+    /// notification history ("View" without one); GNOME doesn't show it.
     pub actions: Vec<&'static str>,
     pub hints: Vec<(&'static str, &'static str)>,
     /// -1: the server's default.
@@ -69,7 +71,7 @@ pub fn request(summary: &str, body: &str) -> Request {
         icon: ICON,
         summary: summary.to_string(),
         body: body.to_string(),
-        actions: vec!["default", ""],
+        actions: vec!["default", "Open"],
         hints: vec![("desktop-entry", DESKTOP_ENTRY)],
         timeout: -1,
     }
@@ -212,7 +214,8 @@ impl Notifier {
                 entry.token = clean_token(&token);
                 None
             }
-            // `default` is a click on the notification itself; it has no buttons.
+            // `default` is a click on the popup's body, or on KDE history's
+            // "Open" button; there are no other actions.
             Signal::Action(_, action) if action == "default" => {
                 Some((entry.target.clone(), entry.token.take()))
             }
@@ -415,7 +418,7 @@ mod tests {
                 icon: "tmpmail-gui",
                 summary: "Code 482913 from GitHub".into(),
                 body: "Sign in".into(),
-                actions: vec!["default", ""],
+                actions: vec!["default", "Open"],
                 hints: vec![("desktop-entry", "tmpmail")],
                 timeout: -1,
             }
