@@ -14,6 +14,8 @@ has only been checked by the automated security probe. Please report what breaks
 - **Linux: clicking a notification brings the window to the front** on KDE. The message
   opened, but KWin only flashed the taskbar entry; the app now passes on the activation
   token the notification server sends with the click.
+- **Linux: notifications are labeled "tmpmail"**, not "tmpmail-gui", and KDE and GNOME
+  list them under the app's notification settings.
 
 ## What's new in 0.1.1
 

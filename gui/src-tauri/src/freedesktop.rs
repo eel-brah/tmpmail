@@ -30,9 +30,15 @@ const BUS: (&str, &str, &str) = (
     "/org/freedesktop/Notifications",
     "org.freedesktop.Notifications",
 );
-/// The name the server shows, until it says otherwise.
-pub const APP_NAME: &str = "tmpmail-gui";
-/// The icon, by name: the packages install it in the hicolor theme.
+/// The name the server shows in the notification's header. (The plugin
+/// sent the binary's name, `tmpmail-gui`.)
+pub const APP_NAME: &str = crate::PROGRAM;
+/// The installed desktop file, without `.desktop`, for the `desktop-entry`
+/// hint: KDE and GNOME take the app's name, icon and notification settings
+/// from it, and group the notifications under it.
+pub const DESKTOP_ENTRY: &str = crate::PROGRAM;
+/// The notification's icon, by name: the packages install it in the hicolor
+/// theme (the desktop file's `Icon`).
 pub const ICON: &str = "tmpmail-gui";
 /// How many notifications remember what a click opens.
 const KEEP: usize = 64;
@@ -64,7 +70,7 @@ pub fn request(summary: &str, body: &str) -> Request {
         summary: summary.to_string(),
         body: body.to_string(),
         actions: vec!["default", ""],
-        hints: Vec::new(),
+        hints: vec![("desktop-entry", DESKTOP_ENTRY)],
         timeout: -1,
     }
 }
@@ -405,12 +411,12 @@ mod tests {
         assert_eq!(
             r,
             Request {
-                app_name: "tmpmail-gui",
+                app_name: "tmpmail",
                 icon: "tmpmail-gui",
                 summary: "Code 482913 from GitHub".into(),
                 body: "Sign in".into(),
                 actions: vec!["default", ""],
-                hints: vec![],
+                hints: vec![("desktop-entry", "tmpmail")],
                 timeout: -1,
             }
         );

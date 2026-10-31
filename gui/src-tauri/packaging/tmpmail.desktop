@@ -9,6 +9,7 @@ Icon={{icon}}
 Name={{name}}
 Terminal=false
 Type=Application
+X-GNOME-UsesNotifications=true
 {{#if mime_type}}
 MimeType={{mime_type}}
 {{/if}}

@@ -50,7 +50,13 @@ preview on `gui-v*` tags; install steps are in the [main README](../README.md#de
   the window's user time), so KWin's focus-stealing prevention lets the window come to the
   front instead of only flashing its taskbar entry. The token is taken only from the server
   that showed the notification, only as printable ASCII of at most 512 bytes, and used
-  once; without one (an older server) the window is raised as before. On Windows the installed app shows its own toasts, which launch a
+  once; without one (an older server) the window is raised as before. The notifications
+  are sent as `tmpmail`, with the `desktop-entry` hint `tmpmail` (the installed
+  `tmpmail.desktop`), so KDE and GNOME label them "tmpmail" with its icon and file them
+  under the app's own notification settings (0.1.1 sent the binary's name, `tmpmail-gui`;
+  the desktop file has `X-GNOME-UsesNotifications=true`, so GNOME lists the app there before
+  its first notification). The AppImage installs no desktop file by itself, so there the
+  hint only helps once a tool like AppImageLauncher has integrated it. On Windows the installed app shows its own toasts, which launch a
   `tmpmail-desktop://open?inbox=…&message=…` link the installer registers: a click, on
   screen or later in the notification center, brings the running app back (only one runs:
   a second start hands its link over and exits) or starts it, and opens the message. A
@@ -65,7 +71,10 @@ preview on `gui-v*` tags; install steps are in the [main README](../README.md#de
   itself, so everything is in the menu (on Windows a click shows the window). Linux needs a
   StatusNotifier host: KDE and most desktops have one, **stock GNOME needs the AppIndicator
   extension**. Without a host the settings say so and closing the window still quits, so
-  the app can't vanish. macOS gets a monochrome template icon.
+  the app can't vanish. On Linux the icon's title (what KDE shows for it) is `tmpmail`, which
+  libappindicator takes from the GTK program name; the tray library offers no tooltip
+  there. macOS gets a
+  monochrome template icon.
 - **Settings** (gear in the sidebar footer, or `Ctrl+,` / `Cmd+,`): theme, provider order
   (turn providers on and off, move them up and down; the fallback order is spelled out),
   poll interval (2–3600 s), live push, request timeout (1–600 s), notifications, tray and
