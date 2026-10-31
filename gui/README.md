@@ -61,9 +61,11 @@ a safe HTML preview in light or dark, and the TUI's actions and keys. Not releas
   variables that win over a field (`TMPMAIL_PROVIDER`, `TMPMAIL_POLL_INTERVAL`,
   `TMPMAIL_PUSH`, `TMPMAIL_HTTP_TIMEOUT`) are named under it. "Show in folder" reveals the
   config file. Saving only restarts polling (and the push streams) when `config.toml`
-  changed. `http_timeout` is new after the CLI's 0.2.0, which refuses unknown keys (0.2.1 and
-  later only warn): it is written only once the timeout is changed from 20 s, and the
-  screen says so.
+  changed. `http_timeout` is new in tmpmail 0.3.0. tmpmail 0.2.0 and earlier refuse unknown
+  config keys; 0.3.0 and later warn. So it is written only once the timeout is changed
+  from 20 s, and the screen says so. Unknown keys in `config.toml` show as an info notice
+  (`tmpmail: unknown key …, ignored`) at start, and after a save only for keys that are new
+  since the last load.
 - **Look:** System / Light / Dark switch (remembered), resizable panes (remembered),
   keyboard focus rings, motion only on arrival of mail and dialogs, none with
   `prefers-reduced-motion`.
@@ -105,9 +107,9 @@ shows them in the app.
   its permissions kept, and only if a field changed. A config the CLI couldn't read is
   never written.
 - Notifications, the tray and start hidden are the app's own, in `gui.json` next to
-  `config.toml`. They aren't a `[gui]` table in `config.toml` because the released CLI
-  0.2.0 refuses unknown keys there, so such a table would stop it from starting (0.2.1 and
-  later warn and go on).
+  `config.toml`. They aren't a `[gui]` table in `config.toml` because tmpmail 0.2.0 and
+  earlier refuse unknown config keys (0.3.0 and later warn), so such a table would stop
+  them from starting.
 - The theme and pane widths stay in the webview's own storage, as before.
 
 ## Dragging attachments out

@@ -89,9 +89,11 @@ impl Watcher {
     /// Uses a new config (the desktop app's settings) from now on: the poll
     /// interval, push and the request timeout. The old poller's push
     /// streams end, and every inbox is listed again on the next turn.
+    /// Only unknown keys the last config didn't have are reported, so
+    /// saving the settings doesn't repeat warnings already shown.
     pub fn set_config(&mut self, config: Config) {
         crate::http::set_timeout(config.http_timeout);
-        for w in config.warnings() {
+        for w in config.new_warnings(&self.app.config) {
             self.app.note(&w);
         }
         self.poller = Self::poller(&config);
@@ -428,5 +430,36 @@ mod tests {
 
         drop(req_tx);
         worker.join().unwrap();
+    }
+
+    #[test]
+    fn unknown_keys_are_reported_only_when_they_change() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = App::for_test(dir.path().to_path_buf());
+        let (log_tx, log) = channel();
+        app.log_to(log_tx);
+        let mut w = Watcher::with_app(app);
+        let mut set = |text: &str| {
+            w.set_config(Config::parse(text).unwrap());
+            log.try_iter().collect::<Vec<_>>()
+        };
+
+        let first = set("gui = 1\npoll_interval = 9");
+        assert_eq!(first.len(), 1);
+        assert!(
+            first[0].starts_with("tmpmail: unknown key \"gui\""),
+            "{first:?}"
+        );
+        // Saving again with the same unknown key says nothing.
+        assert!(set("gui = 2\npoll_interval = 10").is_empty());
+        // Only a key that wasn't there before is reported.
+        let added = set("gui = 2\nnewer = true");
+        assert_eq!(added.len(), 1);
+        assert!(added[0].contains("\"newer\""), "{added:?}");
+        // Removing one doesn't repeat the other.
+        assert!(set("gui = 2").is_empty());
+        // Gone, and back: reported again.
+        assert!(set("poll_interval = 5").is_empty());
+        assert_eq!(set("gui = 1").len(), 1);
     }
 }

@@ -99,7 +99,8 @@ enum Ev {
 
 fn worker(global: Global, rx: Receiver<Req>, tx: Sender<Ev>, log: Sender<String>) -> Result<()> {
     let mut w = Watcher::new(global)?;
-    w.app.log_to(log.clone());
+    // `run` already sent the config warnings to this log.
+    w.app.log_to_quietly(log.clone());
     w.run(&rx, &mut Front { tx, log });
     Ok(())
 }

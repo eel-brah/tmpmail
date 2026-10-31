@@ -114,7 +114,7 @@ impl App {
         static WARNED: std::sync::Once = std::sync::Once::new();
         WARNED.call_once(|| {
             for w in app.config.warnings() {
-                app.note(&format!("tmpmail: {w}"));
+                app.note(&w);
             }
         });
         Ok(app)
@@ -148,6 +148,12 @@ impl App {
         for w in self.config.warnings() {
             let _ = log.send(clean_line(&w));
         }
+        self.log_to_quietly(log);
+    }
+
+    /// Like [`App::log_to`], without the config warnings (another `App`
+    /// sharing the log has sent them).
+    pub(crate) fn log_to_quietly(&mut self, log: Sender<String>) {
         self.log = Some(log);
     }
 

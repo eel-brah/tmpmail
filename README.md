@@ -369,12 +369,12 @@ pager = "less"                        # for long messages in `read` (default $PA
 poll_interval = 5                     # seconds, for wait/watch
 timeout = 180                         # default wait timeout
 push = true                           # live push from mail.tm/DropMail in wait/watch
-http_timeout = 20                     # seconds per request to a provider (newer than 0.2.0)
+http_timeout = 20                     # seconds per request to a provider (new in 0.3.0)
 ```
 
 A key tmpmail doesn't know (a typo, or one from a newer version) is ignored with a warning
-on stderr (`-q` and `--json` silence it); 0.2.0 refused such a file. A known key with a bad
-value is still an error.
+on stderr (`-q` and `--json` silence it): tmpmail 0.2.0 and earlier refuse unknown config
+keys; 0.3.0 and later warn. A known key with a bad value is still an error.
 
 Environment: `TMPMAIL_PROVIDER` (comma list), `TMPMAIL_TIMEOUT`, `TMPMAIL_POLL_INTERVAL`,
 `TMPMAIL_PUSH`, `TMPMAIL_HTTP_TIMEOUT`, `TMPMAIL_INBOX`, `TMPMAIL_PASSWORD`, `TMPMAIL_STATE_DIR`,

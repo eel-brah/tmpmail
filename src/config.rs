@@ -114,14 +114,26 @@ impl Config {
     /// One warning per top-level key this version doesn't know (and
     /// ignores), in order, for the front ends to show.
     pub fn warnings(&self) -> Vec<String> {
+        self.warnings_for(self.unknown.keys())
+    }
+
+    /// The warnings for unknown keys that `old` didn't have, so a reload
+    /// (the desktop app's settings) doesn't repeat what was already shown.
+    pub(crate) fn new_warnings(&self, old: &Config) -> Vec<String> {
+        self.warnings_for(
+            self.unknown
+                .keys()
+                .filter(|k| !old.unknown.contains_key(*k)),
+        )
+    }
+
+    fn warnings_for<'a>(&self, keys: impl Iterator<Item = &'a String>) -> Vec<String> {
         let file = self
             .source
             .as_ref()
             .map(|p| p.display().to_string())
             .unwrap_or_else(|| "the config".into());
-        self.unknown
-            .keys()
-            .map(|k| format!("unknown key {k:?} in {file}, ignored"))
+        keys.map(|k| format!("tmpmail: unknown key {k:?} in {file}, ignored"))
             .collect()
     }
 
@@ -178,8 +190,8 @@ mod tests {
         assert_eq!(
             cfg.warnings(),
             [
-                "unknown key \"gui\" in the config, ignored",
-                "unknown key \"http_timeuot\" in the config, ignored"
+                "tmpmail: unknown key \"gui\" in the config, ignored",
+                "tmpmail: unknown key \"http_timeuot\" in the config, ignored"
             ]
         );
         assert!(
