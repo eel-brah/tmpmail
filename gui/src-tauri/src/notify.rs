@@ -4,6 +4,13 @@
 //! Clicking it brings the window back and opens the message. Sender and
 //! subject are the sender's words: they are cleaned (`clean_line`) and capped
 //! before they reach the notification server.
+//!
+//! Windows reports a click to the app only while the toast is on screen;
+//! from the notification center it can only start something. So the
+//! installed app shows its toasts itself, launching a
+//! `tmpmail-desktop://open?inbox=…&message=…` link the installer registers
+//! for it: Windows starts the app with the link, and the single-instance
+//! plugin hands it to the running one (`activation`).
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -27,6 +34,10 @@ const SUBJECT_MAX: usize = 100;
 const CODE_MAX: usize = 32;
 /// How many notifications remember what a click opens.
 const KEEP_CLICKS: usize = 64;
+/// The link scheme a Windows toast launches (registered by the installer,
+/// `packaging/windows/hooks.nsh`).
+#[cfg_attr(not(windows), allow(dead_code))]
+pub const ACTIVATION_SCHEME: &str = "tmpmail-desktop";
 
 /// A message that just arrived.
 #[derive(Debug, Clone)]
@@ -209,15 +220,156 @@ fn body_for_server(body: &str) -> String {
     body.to_string()
 }
 
+/// Escapes text for markup: a Linux server's body, a Windows toast's XML.
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn escape_markup(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
+}
+
+/// The link a toast launches to open `target` (Windows).
+#[cfg_attr(not(windows), allow(dead_code))]
+pub fn activation_link(target: &Target) -> String {
+    let mut params = vec![("inbox", target.address.as_str())];
+    if let Some(id) = &target.id {
+        params.push(("message", id.as_str()));
+    }
+    tauri::Url::parse_with_params(&format!("{ACTIVATION_SCHEME}://open"), &params)
+        .expect("a constant base URL")
+        .into()
+}
+
+/// What an activation link asks to open: an inbox and maybe a message,
+/// checked like any input (it could come from any program, or a web page
+/// the user let open the link). `None` for anything else; the address must
+/// still be a stored inbox, which `reveal` and the page check.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub fn activation(arg: &str) -> Option<Target> {
+    if arg.len() > 2048 {
+        return None;
+    }
+    let url = tauri::Url::parse(arg).ok()?;
+    if url.scheme() != ACTIVATION_SCHEME
+        || url.host_str() != Some("open")
+        || !matches!(url.path(), "" | "/")
+        || url.fragment().is_some()
+        || url.username() != ""
+        || url.password().is_some()
+        || url.port().is_some()
+    {
+        return None;
+    }
+    let (mut address, mut id) = (None, None);
+    for (key, value) in url.query_pairs() {
+        let slot = match &*key {
+            "inbox" => &mut address,
+            "message" => &mut id,
+            _ => return None,
+        };
+        if slot.replace(value.into_owned()).is_some() {
+            return None; // given twice
+        }
+    }
+    let address = address.filter(|a| {
+        a.len() <= 254 && a.contains('@') && !a.chars().any(|c| c.is_control() || c.is_whitespace())
+    })?;
+    if let Some(id) = &id
+        && (id.is_empty() || id.len() > 512 || id.chars().any(char::is_control))
+    {
+        return None;
+    }
+    Some(Target { address, id })
+}
+
+/// Whether the installer registered the activation scheme for this very
+/// exe: then it also made the Start menu shortcut that carries the app id
+/// Windows needs to show a toast, and a click starts this app. Release
+/// builds only (a debug build runs beside the installed app).
+#[cfg(windows)]
+fn installed() -> bool {
+    static INSTALLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *INSTALLED.get_or_init(|| {
+        if cfg!(debug_assertions) {
+            return false;
+        }
+        let Ok(exe) = tauri::utils::platform::current_exe() else {
+            return false;
+        };
+        let expected = format!("\"{}\" \"%1\"", exe.display());
+        scheme_command().is_some_and(|c| c.eq_ignore_ascii_case(&expected))
+    })
+}
+
+/// The command registered for the activation scheme, if any.
+#[cfg(windows)]
+fn scheme_command() -> Option<String> {
+    use windows::Win32::System::Registry::{HKEY_CLASSES_ROOT, RRF_RT_REG_SZ, RegGetValueW};
+    use windows::core::HSTRING;
+    let key = HSTRING::from(format!("{ACTIVATION_SCHEME}\\shell\\open\\command"));
+    let mut buf = [0u16; 1024];
+    let mut len = u32::try_from(std::mem::size_of_val(&buf)).ok()?;
+    // SAFETY: reads a string value into `buf`, whose size in bytes is
+    // `len`; the call writes at most that and sets `len` to what it wrote.
+    let read = unsafe {
+        RegGetValueW(
+            HKEY_CLASSES_ROOT,
+            &key,
+            None,
+            RRF_RT_REG_SZ,
+            None,
+            Some(buf.as_mut_ptr().cast()),
+            Some(&mut len),
+        )
+    };
+    if read.is_err() {
+        return None;
+    }
+    let chars = (len as usize / 2).min(buf.len());
+    let value = String::from_utf16(&buf[..chars]).ok()?;
+    Some(value.trim_end_matches('\0').to_string())
+}
+
+/// The toast's XML: a click (on screen or in the notification center)
+/// launches `link`. Title and body are the sender's words, escaped.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn toast_xml(title: &str, body: &str, link: &str) -> String {
+    let esc = escape_markup;
+    format!(
+        "<toast activationType=\"protocol\" launch=\"{}\"><visual><binding template=\"ToastGeneric\">\
+         <text>{}</text><text>{}</text></binding></visual></toast>",
+        esc(link),
+        esc(title),
+        esc(body)
+    )
+}
+
+/// Shows a toast that launches `link` when clicked, under the app's id.
+#[cfg(windows)]
+fn show_toast(app: &AppHandle, title: &str, body: &str, link: &str) -> windows::core::Result<()> {
+    use windows::Data::Xml::Dom::XmlDocument;
+    use windows::UI::Notifications::{ToastNotification, ToastNotificationManager};
+    use windows::core::HSTRING;
+    let doc = XmlDocument::new()?;
+    doc.LoadXml(&HSTRING::from(toast_xml(title, body, link)))?;
+    let toast = ToastNotification::CreateToastNotification(&doc)?;
+    let id = HSTRING::from(app.config().identifier.as_str());
+    ToastNotificationManager::CreateToastNotifierWithId(&id)?.Show(&toast)
 }
 
 /// Shows a notification that opens `target` when clicked.
 pub fn show(app: &AppHandle, shared: &Shared, title: &str, body: &str, target: Option<Target>) {
+    #[cfg(windows)]
+    if let Some(t) = &target
+        && installed()
+    {
+        match show_toast(app, title, body, &activation_link(t)) {
+            Ok(()) => return,
+            Err(e) => eprintln!("tmpmail-gui: could not show a toast ({e}), trying the plugin"),
+        }
+    }
     let id = shared.next_notification.fetch_add(1, Ordering::Relaxed);
     if let Some(t) = target {
         let mut clicks = shared.clicks.lock().expect("clicks lock");
@@ -245,6 +397,52 @@ pub fn show(app: &AppHandle, shared: &Shared, title: &str, body: &str, target: O
 /// isn't focused (a hidden or minimized window never is).
 pub fn wanted(shared: &Shared) -> bool {
     shared.gui.lock().expect("gui lock").notifications && !shared.focused.load(Ordering::Relaxed)
+}
+
+/// What a notification click asked for before the page could take it.
+#[derive(Default)]
+pub struct Pending {
+    /// The page has called `init` (so it listens for `reveal`).
+    pub page_ready: bool,
+    pub target: Option<Target>,
+}
+
+/// Handles the command line of a second start of the app (Windows: a toast
+/// was clicked, or the app was started again): brings the window back and
+/// opens what an activation link asks for, if it names a stored inbox.
+/// Before the page is up, the target waits for `init` (the page checks it
+/// against its inboxes). At most once a second, so a flood of links can't
+/// keep taking the focus.
+#[cfg(all(windows, not(debug_assertions)))]
+pub fn relaunched(app: &AppHandle, shared: &Shared, args: &[String]) {
+    static LAST: std::sync::Mutex<Option<Instant>> = std::sync::Mutex::new(None);
+    {
+        let mut last = LAST.lock().expect("relaunch lock");
+        if last.is_some_and(|t| t.elapsed() < Duration::from_secs(1)) {
+            return;
+        }
+        *last = Some(Instant::now());
+    }
+    let target = args.iter().skip(1).find_map(|a| activation(a));
+    {
+        let mut pending = shared.pending.lock().expect("pending lock");
+        if !pending.page_ready {
+            if target.is_some() {
+                pending.target = target;
+            }
+            drop(pending);
+            reveal(app, None);
+            return;
+        }
+    }
+    let target = target.filter(|t| {
+        shared
+            .inboxes
+            .lock()
+            .expect("inboxes lock")
+            .contains_key(&t.address)
+    });
+    reveal(app, target);
 }
 
 /// Brings the window back (from the tray, minimized or behind others) and
@@ -371,6 +569,61 @@ mod tests {
     }
 
     #[test]
+    fn activation_links_round_trip_and_nothing_else_passes() {
+        let t = Target {
+            address: "otter+x@mail.tm".into(),
+            id: Some("6a/b c&d=e".into()),
+        };
+        let link = activation_link(&t);
+        assert!(link.starts_with("tmpmail-desktop://open?inbox=otter%2Bx%40mail.tm&message="));
+        let back = activation(&link).unwrap();
+        assert_eq!((back.address, back.id), (t.address.clone(), t.id.clone()));
+        let inbox_only = activation_link(&Target {
+            address: t.address.clone(),
+            id: None,
+        });
+        assert_eq!(activation(&inbox_only).unwrap().id, None);
+
+        for bad in [
+            "tmpmail-desktop://open",
+            "tmpmail-desktop://open?message=1",
+            "tmpmail-desktop://delete?inbox=a%40b.c",
+            "tmpmail-desktop://open/x?inbox=a%40b.c",
+            "tmpmail-desktop://open?inbox=a%40b.c&inbox=c%40d.e",
+            "tmpmail-desktop://open?inbox=a%40b.c&run=1",
+            "tmpmail-desktop://open?inbox=a%40b.c&message=",
+            "tmpmail-desktop://open?inbox=a%40b.c&message=%1B[2J",
+            "tmpmail-desktop://open?inbox=not-an-address",
+            "tmpmail-desktop://open?inbox=a%40b.c#x",
+            "tmpmail-desktop://u:p@open?inbox=a%40b.c",
+            "https://open?inbox=a%40b.c",
+            "--inbox=a@b.c",
+        ] {
+            assert!(activation(bad).is_none(), "{bad}");
+        }
+        let long = format!(
+            "tmpmail-desktop://open?inbox=a%40b.c&message={}",
+            "x".repeat(2100)
+        );
+        assert!(activation(&long).is_none());
+    }
+
+    #[test]
+    fn the_toast_xml_escapes_the_senders_words() {
+        let xml = toast_xml(
+            "Code 1 from <b>\"Evil\"</b>",
+            "a & b's",
+            "tmpmail-desktop://open?inbox=a%40b.c&message=1",
+        );
+        assert_eq!(
+            xml,
+            "<toast activationType=\"protocol\" launch=\"tmpmail-desktop://open?inbox=a%40b.c&amp;message=1\">\
+             <visual><binding template=\"ToastGeneric\"><text>Code 1 from &lt;b&gt;&quot;Evil&quot;&lt;/b&gt;</text>\
+             <text>a &amp; b&apos;s</text></binding></visual></toast>"
+        );
+    }
+
+    #[test]
     fn sender_words_are_cleaned_and_capped() {
         let s = summary(
             "1",
@@ -387,5 +640,6 @@ mod tests {
             escape_markup("<img src=x> & <b>"),
             "&lt;img src=x&gt; &amp; &lt;b&gt;"
         );
+        assert_eq!(escape_markup(r#""a's""#), "&quot;a&apos;s&quot;");
     }
 }

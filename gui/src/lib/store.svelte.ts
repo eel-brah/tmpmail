@@ -69,6 +69,8 @@ class AppState {
 
   /** Message ids each inbox had at its first listing, to spot new mail. */
   #known = new Map<string, Set<string>>();
+  /** What a notification click that started the app opens, once the inboxes are in. */
+  #pendingReveal: { address: string; id: string | null } | null = null;
   #toastId = 0;
 
   current = $derived(this.inboxes.find((i) => i.address === this.selected) ?? null);
@@ -265,6 +267,16 @@ class AppState {
     }
   }
 
+  /** Opens what a notification click asked for before the inboxes were in. Returns whether it did. */
+  #revealPending(): boolean {
+    const r = this.#pendingReveal;
+    if (!r || !this.inboxes.length || document.querySelector("dialog[open]")) return false;
+    this.#pendingReveal = null;
+    if (!this.inboxes.some((i) => i.address === r.address)) return false;
+    this.reveal(r.address, r.id);
+    return true;
+  }
+
   // ---------- events ----------
 
   #onMessages(address: string, list: Summary[]) {
@@ -291,6 +303,8 @@ class AppState {
     const unlisten = [
       on("inboxes", (p) => {
         this.inboxes = p.inboxes;
+        // A notification click's inbox first, so only that one is listed now.
+        if (this.#revealPending()) return;
         if (!this.selected || !this.inboxes.some((i) => i.address === this.selected)) {
           const first = this.inboxes.find((i) => i.active) ?? this.inboxes[0];
           this.selected = null;
@@ -346,13 +360,19 @@ class AppState {
       on("notice", (p) => this.toast(p.kind, p.text)),
       on("reveal", (p) => {
         if (document.querySelector("dialog[open]")) return;
-        this.reveal(p.address, p.id);
+        // Before the inboxes are in: once they are.
+        if (!this.inboxes.length) this.#pendingReveal = p;
+        else this.reveal(p.address, p.id);
       }),
     ];
     // Listen first, then ask for the data, so the first events aren't lost.
     void Promise.all(unlisten)
       .then(() => api.init())
-      .then((i) => (this.init = i))
+      .then((i) => {
+        this.init = i;
+        if (i.reveal) this.#pendingReveal = i.reveal;
+        this.#revealPending();
+      })
       .catch((e) => (this.startError = errorText(e)));
     const tick = window.setInterval(() => (this.now = Date.now()), 30000);
     return () => {

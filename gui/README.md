@@ -43,8 +43,13 @@ preview on `gui-v*` tags; install steps are in the [main README](../README.md#de
   none; on macOS the system decides whether to ask when the first one is shown (not tested
   yet; System Settings → Notifications turns them on or off), and debug builds started with
   `tauri dev` post as Terminal. Clicks are reported on Linux (servers with the `default` action, e.g.
-  KDE, GNOME), on macOS, and on Windows only while the toast is on screen, not from the
-  Action Center; Windows shows the app's name only for the installed app.
+  KDE, GNOME) and on macOS. On Windows the installed app shows its own toasts, which launch a
+  `tmpmail-desktop://open?inbox=…&message=…` link the installer registers: a click, on
+  screen or later in the notification center, brings the running app back (only one runs:
+  a second start hands its link over and exits) or starts it, and opens the message. A
+  debug build, or one the installer didn't register the link for, has no app id for Windows, so its toasts go through the plugin
+  and a click counts only while the toast is on screen. Windows shows the app's name only
+  for the installed app.
 - **Tray icon (opt-in):** turned on in the settings. Its menu has Show tmpmail, New address
   (the first provider that works; the address is copied and a notification says so), Copy
   code (the newest code of the last 15 minutes, across inboxes; greyed out otherwise) and
@@ -211,7 +216,9 @@ in `tauri.conf.json`:
   reports the app as "damaged" with no way past. It isn't notarized, so users go through
   Open Anyway once.
 - **Windows:** an NSIS installer only (no MSI), per user (no admin prompt), with the
-  WebView2 bootstrapper that downloads WebView2 if it's missing.
+  WebView2 bootstrapper that downloads WebView2 if it's missing. Its hooks
+  (`src-tauri/packaging/windows/hooks.nsh`) register the `tmpmail-desktop:` link scheme for
+  notification clicks under `HKCU\Software\Classes` and remove it on uninstall.
 - **Release builds contain no probe**: `probe.rs` and everything that calls it are
   `#[cfg(debug_assertions)]`, and the release workflow fails if the binary contains
   `TMPMAIL_GUI_PROBE`. The caller check and the closed `postMessage` route are in every
@@ -340,3 +347,8 @@ to `probe.log`, both are uploaded, and the job fails unless `probe.json` parses 
    arbitrary text. Settings are checked field by field in Rust before anything is written.
 8. The shell has a strict CSP, `freezePrototype`, no global Tauri object, no asset protocol,
    and one capability.
+9. Windows: the `tmpmail-desktop:` scheme a notification click launches can be opened by
+   any program, or a web page the user allows to. The app accepts only
+   `tmpmail-desktop://open?inbox=ADDRESS[&message=ID]` (no other key, each once, the shapes
+   checked) and only for a stored inbox; it can bring the window back and open that
+   message, nothing else. Anything else on the command line is ignored.

@@ -33,6 +33,8 @@ export interface Init {
   probe: ProbePlan | null;
   /** Whether attachments can be dragged out on this system. */
   drag: boolean;
+  /** A notification click started the app (Windows): open this once the inboxes are in. */
+  reveal: { address: string; id: string | null } | null;
 }
 
 export interface GuiSettings {

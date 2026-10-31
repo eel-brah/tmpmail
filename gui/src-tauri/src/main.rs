@@ -99,6 +99,9 @@ pub struct Shared {
     pub last_code: Mutex<Option<tray::LastCode>>,
     /// What a click on each shown notification opens.
     pub clicks: Mutex<HashMap<i32, notify::Target>>,
+    /// What a click on a notification asked for before the page was up
+    /// (Windows: the click started the app); `init` hands it over.
+    pub pending: Mutex<notify::Pending>,
     pub next_notification: AtomicI32,
     /// Attachments written out for dragging.
     pub drag: drag::Files,
@@ -219,6 +222,15 @@ fn main() {
     } else {
         settings::load_gui()
     };
+    // Started by a click on a notification in Windows' notification center
+    // (the app wasn't running): open what it names once the page is up.
+    #[cfg(windows)]
+    let pending = std::env::args_os()
+        .skip(1)
+        .find_map(|a| a.to_str().and_then(notify::activation));
+    #[cfg(not(windows))]
+    let pending: Option<notify::Target> = None;
+    let start_hidden = gui.start_minimized && pending.is_none();
     let shared = Arc::new(Shared {
         worker: OnceLock::new(),
         start_error: OnceLock::new(),
@@ -230,6 +242,10 @@ fn main() {
         tray_host: AtomicBool::new(true),
         last_code: Mutex::new(None),
         clicks: Mutex::new(HashMap::new()),
+        pending: Mutex::new(notify::Pending {
+            page_ready: false,
+            target: pending,
+        }),
         next_notification: AtomicI32::new(1),
         drag: drag::Files::default(),
         #[cfg(debug_assertions)]
@@ -239,7 +255,17 @@ fn main() {
     let for_scheme = shared.clone();
     // Plugins are used from Rust only: the page has no permission for any
     // of them (see capabilities/main.json).
-    let builder = tauri::Builder::default()
+    let builder = tauri::Builder::default();
+    // Windows: a second start (a click on a notification launches the app
+    // with an activation link) hands its command line to this one and
+    // exits. First, so it runs before anything else starts. Release builds
+    // only: a debug build (and the probe) runs beside the installed app.
+    #[cfg(all(windows, not(debug_assertions)))]
+    let builder = builder.plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
+        let shared = app.state::<Arc<Shared>>();
+        notify::relaunched(app, &shared, &args);
+    }));
+    let builder = builder
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_dialog::init())
@@ -346,7 +372,7 @@ fn main() {
                 let host = tray::host_available();
                 shared.tray_host.store(host, Ordering::Relaxed);
                 match tray::set(app.handle(), &shared, true) {
-                    Ok(()) => hidden = gui.start_minimized && host,
+                    Ok(()) => hidden = start_hidden && host,
                     Err(e) => eprintln!("tmpmail-gui: no tray icon: {e}"),
                 }
             }

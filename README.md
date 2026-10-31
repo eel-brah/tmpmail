@@ -130,7 +130,8 @@ inboxes and their mail live, puts the verification code in a big banner with a C
 lists the verification link first, previews HTML mail safely (light or dark), saves
 attachments (or drags them out on Linux and macOS), and creates and deletes inboxes and
 messages, with the TUI's keyboard shortcuts. It notifies you of new mail (with the code, if
-there is one) while it's in the background, can sit in the tray and keep checking with the
+there is one) while it's in the background, and a click on the notification opens it (on
+Windows from the notification center too), can sit in the tray and keep checking with the
 window closed, and has a settings screen. [More](gui/README.md).
 
 ![The tmpmail desktop app showing a verification code in a banner above the mail](assets/desktop.png)

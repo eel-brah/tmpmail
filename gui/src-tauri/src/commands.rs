@@ -125,11 +125,18 @@ pub fn init(shared: State<'_, Arc<Shared>>) -> Result<Value, String> {
         .map(|p| json!({ "id": p.id(), "name": p.name(), "caps": p.caps() }))
         .collect();
     send(&shared, Req::Refresh)?;
+    let reveal = {
+        let mut pending = shared.pending.lock().expect("pending lock");
+        pending.page_ready = true;
+        pending.target.take()
+    }
+    .map(|t| json!({ "address": t.address, "id": t.id }));
     Ok(json!({
         "origin": scheme::origin(),
         "providers": providers,
         "probe": probe,
         "drag": drag::SUPPORTED,
+        "reveal": reveal,
     }))
 }
 
