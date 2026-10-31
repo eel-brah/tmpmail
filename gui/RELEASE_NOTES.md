@@ -21,6 +21,9 @@ has only been checked by the automated security probe. Please report what breaks
 - **"Live" stays on for mail.tm**: the push connection was dropped and redone every 75
   seconds, so "Live" blinked off (after new mail, among other times). It now stays up, and
   a quick reconnect doesn't hide it.
+- **Delete confirmations open on "Keep it"**, not on the red button, so a stray Enter or
+  Space right after `d` or `D` cancels instead of deleting. Press `y` (as in the TUI) or
+  click the red button to delete.
 - **The Windows installer** shows the tmpmail icon, header and sidebar instead of NSIS's.
 
 ## What it does

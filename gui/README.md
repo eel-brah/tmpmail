@@ -101,7 +101,7 @@ shows them in the app.
 | `c` | Copy the address |
 | `a` | Make the inbox the active one |
 | `r` | Check for mail now |
-| `d` / `D` | Delete the message / the inbox (asks first) |
+| `d` / `D` | Delete the message / the inbox (asks first: the dialog opens on "Keep it", so Enter or Space cancels; `y` or a click deletes) |
 | `/` | Filter messages |
 | `?` | Shortcut help |
 | `Ctrl+,` / `Cmd+,` | Settings |

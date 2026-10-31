@@ -1,5 +1,7 @@
 <script lang="ts">
-  // Asks before deleting a message or an inbox, like the TUI's d and D.
+  // Asks before deleting a message or an inbox, like the TUI's d and D. It opens on
+  // "Keep it", so a stray Enter or Space right after d/D cancels. Deleting takes y (as in
+  // the TUI), Tab to the red button, or a click; macOS WebKit skips buttons on Tab by default.
   import Icon from "./Icon.svelte";
   import { app } from "./store.svelte";
 
@@ -18,6 +20,15 @@
     else if (c?.kind === "inbox") app.deleteInbox(c.address);
     app.confirm = null;
   }
+
+  function onkeydown(e: KeyboardEvent) {
+    // A held Enter or Space would close and reopen the dialog from the page's Delete button.
+    if (e.repeat && (e.key === "Enter" || e.key === " ")) e.preventDefault();
+    else if ((e.key === "y" || e.key === "Y") && !e.ctrlKey && !e.metaKey && !e.altKey) {
+      e.preventDefault();
+      confirm();
+    }
+  }
 </script>
 
 <dialog
@@ -25,6 +36,7 @@
   class="w-[min(26rem,calc(100vw-2rem))]"
   aria-labelledby="confirm-title"
   onclose={() => (app.confirm = null)}
+  {onkeydown}
 >
   {#if c}
     <div class="flex min-h-0 flex-col">
@@ -50,10 +62,11 @@
           {/if}
         </div>
       </div>
-      <footer class="flex shrink-0 justify-end gap-2 border-t border-rule px-6 py-3.5">
-        <button class="btn" onclick={() => (app.confirm = null)}>Keep it</button>
+      <footer class="flex shrink-0 items-center justify-end gap-2 border-t border-rule px-6 py-3.5">
+        <p class="mr-auto text-2xs text-muted">Or press <kbd>y</kbd> to delete</p>
         <!-- svelte-ignore a11y_autofocus -->
-        <button class="btn btn-danger" onclick={confirm} autofocus>
+        <button class="btn" onclick={() => (app.confirm = null)} autofocus>Keep it</button>
+        <button class="btn btn-danger" onclick={confirm}>
           {c.kind === "message" ? "Delete message" : "Delete inbox"}
         </button>
       </footer>
