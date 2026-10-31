@@ -15,11 +15,19 @@ pub const DEFAULT_POLL_INTERVAL: u64 = 5;
 /// Seconds before a request gives up when nothing sets it.
 pub const DEFAULT_HTTP_TIMEOUT: u64 = 20;
 
+/// tmpmail's settings: the config file plus environment overrides.
+///
 /// Known keys are checked strictly (type and value); unknown ones are kept
 /// aside and reported as warnings, so a newer key (or a typo) never stops an
 /// older tmpmail from starting.
+///
+/// Fields can be added in any release, so the struct is `#[non_exhaustive]`:
+/// read one with [`Config::load`] (or [`Config::parse`]), or build one with
+/// `Config::default()` and then set fields. Fields set by hand skip the
+/// checks `load` makes (provider ids, `http_timeout` of at least 1).
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
+#[non_exhaustive]
 pub struct Config {
     /// Provider ids tried in order by `new`.
     pub providers: Option<Vec<String>>,
