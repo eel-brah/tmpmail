@@ -92,7 +92,11 @@ preview on `gui-v*` tags; install steps are in the [main README](../README.md#de
 - **Look:** System / Light / Dark switch (remembered), resizable panes (remembered),
   keyboard focus rings, motion only on arrival of mail and dialogs, none with
   `prefers-reduced-motion`. The window opens at 1240×780, or smaller and centered when the
-  primary screen's work area can't hold that; its minimum size follows the screen it is on.
+  primary screen's work area can't hold that, title bar included; its minimum size follows
+  the screen it is on. Where GTK can't tell the work area (always on Wayland; on X11 when the
+  window manager doesn't publish one), 80 px are left for panels on each axis (a 1280×800
+  screen gets 1184×672). Wayland has no primary screen either: the window then fits the
+  narrowest and shortest screen, and the compositor places it.
   Every dialog fits the window: its body scrolls while the title and buttons stay in view.
 
 What each provider allows decides what's shown: Delete (message) is hidden for DropMail and

@@ -56,16 +56,13 @@ const WINDOW_MIN: (f64, f64) = (900.0, 560.0);
 /// Room left around the window's content in the work area: borders, and
 /// the title bar the system adds above the content.
 const WINDOW_MARGIN: (f64, f64) = (16.0, 48.0);
-/// The margin Tauri's `prevent_overflow` leaves. On Windows it adds the
-/// real title bar itself, so less is asked there; either way the window it
-/// makes is at least as tall as [`fit_window`]'s minimum.
-const OVERFLOW_MARGIN: (f64, f64) = if cfg!(windows) {
-    // Tauri's title bar comes from DPI-unaware metrics, a little short at
-    // high scaling: some extra room.
-    (16.0, 24.0)
-} else {
-    WINDOW_MARGIN
-};
+/// The margin Tauri's `prevent_overflow` leaves on Windows, where it sizes
+/// the window: it adds the real title bar itself, so less is asked; the
+/// window it makes is still at least as tall as [`fit_window`]'s minimum.
+/// Tauri's title bar comes from DPI-unaware metrics, a little short at high
+/// scaling: some extra room.
+#[cfg(windows)]
+const OVERFLOW_MARGIN: (f64, f64) = (16.0, 24.0);
 
 /// The window's size and minimum size for a work area of `work` logical
 /// pixels: the defaults, made smaller on a screen too small for them, so
@@ -80,14 +77,44 @@ fn fit_window(work: (f64, f64)) -> ((f64, f64), (f64, f64)) {
     (size, min)
 }
 
-/// The work area of `monitor` in logical pixels.
+/// Room left for panels on a Linux screen whose work area isn't known: a
+/// bottom Plasma panel (44 px, more when floating), GNOME's top bar and a
+/// dock on the side all fit in it.
+const PANEL_ROOM: (f64, f64) = (80.0, 80.0);
+
+/// The usable part of a monitor of `size` logical pixels whose work area
+/// is `work`. On Wayland, GDK has no work area and gives the whole monitor
+/// for it; so does X11 when the window manager doesn't publish one (KWin's
+/// Xwayland). Then the panels may take [`PANEL_ROOM`] of it, on Linux only.
+fn usable_area(size: (f64, f64), work: (f64, f64)) -> (f64, f64) {
+    if cfg!(target_os = "linux") && work == size {
+        (size.0 - PANEL_ROOM.0, size.1 - PANEL_ROOM.1)
+    } else {
+        work
+    }
+}
+
+/// The usable part of `monitor` in logical pixels (see [`usable_area`]).
 fn work_area(monitor: &tauri::window::Monitor) -> (f64, f64) {
     let scale = monitor.scale_factor();
-    let area = monitor.work_area().size;
-    (
-        f64::from(area.width) / scale,
-        f64::from(area.height) / scale,
-    )
+    let logical =
+        |s: &tauri::PhysicalSize<u32>| (f64::from(s.width) / scale, f64::from(s.height) / scale);
+    usable_area(logical(monitor.size()), logical(&monitor.work_area().size))
+}
+
+/// The usable area the window is sized for: the primary monitor's, where
+/// it opens. Wayland has no primary monitor (GDK returns none) and the
+/// compositor picks where the window goes: then the narrowest width and the
+/// shortest height of all monitors, so it fits on any of them.
+fn window_area(app: &tauri::App) -> Option<(f64, f64)> {
+    if let Ok(Some(m)) = app.primary_monitor() {
+        return Some(work_area(&m));
+    }
+    app.available_monitors()
+        .ok()?
+        .iter()
+        .map(work_area)
+        .reduce(|a, b| (a.0.min(b.0), a.1.min(b.1)))
 }
 
 /// Lets the window shrink to fit the monitor it is now on (it moved, or the
@@ -438,27 +465,32 @@ fn main() {
                 }
             }
 
-            // On a screen too small for the default size, Tauri shrinks the
-            // window to the work area (the primary monitor's: it opens
-            // there) and centers it; the minimum size shrinks with it.
-            let fit = app
-                .primary_monitor()
-                .ok()
-                .flatten()
-                .map(|m| fit_window(work_area(&m)));
-            let (size, min) = fit.unwrap_or((WINDOW, WINDOW_MIN));
+            // On a screen too small for the default size, the window is
+            // made to fit the usable area, title bar included, and Tauri
+            // centers it on the primary monitor (on Wayland it has none:
+            // the compositor places it). The minimum size shrinks with it.
+            // On Windows Tauri shrinks it, as it knows the real title bar.
+            let area = window_area(app);
+            let (size, min) = area.map_or((WINDOW, WINDOW_MIN), fit_window);
+            if std::env::var_os("TMPMAIL_GUI_LOG").is_some() {
+                eprintln!("window: usable area {area:?}, size {size:?}, minimum {min:?}");
+            }
+            let start = if cfg!(windows) { WINDOW } else { size };
             let handle = app.handle().clone();
             let for_popups = shared.clone();
             let mut builder =
                 WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
                     .title("tmpmail")
                     .visible(!hidden)
-                    .inner_size(WINDOW.0, WINDOW.1)
-                    .min_inner_size(min.0, min.1)
-                    .prevent_overflow_with_margin(tauri::LogicalSize::new(
-                        OVERFLOW_MARGIN.0,
-                        OVERFLOW_MARGIN.1,
-                    ));
+                    .inner_size(start.0, start.1)
+                    .min_inner_size(min.0, min.1);
+            #[cfg(windows)]
+            {
+                builder = builder.prevent_overflow_with_margin(tauri::LogicalSize::new(
+                    OVERFLOW_MARGIN.0,
+                    OVERFLOW_MARGIN.1,
+                ));
+            }
             if size != WINDOW {
                 builder = builder.center();
             }
@@ -559,6 +591,40 @@ mod tests {
         // A 1366×768 laptop at 150 %: 910×480 logical.
         let (size, min) = fit_window((910.0, 480.0));
         assert_eq!(size, (894.0, 432.0));
+        assert_eq!(min, size);
+    }
+
+    #[test]
+    fn a_known_work_area_is_used_as_is() {
+        // X11, Windows, macOS: the panels' room is known.
+        assert_eq!(
+            usable_area((1280.0, 800.0), (1280.0, 756.0)),
+            (1280.0, 756.0)
+        );
+        assert_eq!(
+            usable_area((1920.0, 1080.0), (1856.0, 1052.0)),
+            (1856.0, 1052.0)
+        );
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn without_a_work_area_the_panels_get_room() {
+        // KDE Wayland's 1280×800 test screen: GDK gives the whole monitor.
+        // The window and its title bar (KWin's: 28 px) clear a bottom
+        // panel of up to 80 − 28 + 48 = 100 px.
+        let area = usable_area((1280.0, 800.0), (1280.0, 800.0));
+        assert_eq!(area, (1200.0, 720.0));
+        let (size, min) = fit_window(area);
+        assert_eq!(size, (1184.0, 672.0));
+        assert_eq!(min, WINDOW_MIN);
+        assert!(size.1 + WINDOW_MARGIN.1 + PANEL_ROOM.1 <= 800.0);
+        // A big screen keeps the default size.
+        let area = usable_area((1920.0, 1080.0), (1920.0, 1080.0));
+        assert_eq!(fit_window(area), (WINDOW, WINDOW_MIN));
+        // 1366×768 at 150 % (910×512 logical): shorter than the minimum.
+        let (size, min) = fit_window(usable_area((910.0, 512.0), (910.0, 512.0)));
+        assert_eq!(size, (814.0, 384.0));
         assert_eq!(min, size);
     }
 
