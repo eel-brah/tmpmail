@@ -50,11 +50,11 @@ pub struct Global {
     #[cfg_attr(feature = "cli", arg(long, short, global = true))]
     pub quiet: bool,
 
-    /// Browser command for HTML and links (default: $BROWSER, xdg-open, open)
+    /// Browser command for HTML and links (default: config `browser`, $BROWSER, then the system opener)
     #[cfg_attr(feature = "cli", arg(long, short = 'b', global = true))]
     pub browser: Option<String>,
 
-    /// Clipboard command (default: auto-detect wl-copy, xclip, xsel, pbcopy)
+    /// Clipboard command (default: config `clipboard_cmd`, else auto-detected)
     #[cfg_attr(feature = "cli", arg(long, global = true))]
     pub clipboard_cmd: Option<String>,
 }

@@ -65,7 +65,7 @@ pub fn clipboard_command(custom: Option<&str>) -> anyhow::Result<String> {
         .find(|(bin, _, usable)| *usable && on_path(bin))
         .map(|(_, cmd, _)| cmd.to_string())
         .ok_or_else(|| {
-            anyhow!("no clipboard tool found; install wl-clipboard, xclip or xsel, or pass --clipboard-cmd")
+            anyhow!("no clipboard tool found (wl-copy, xclip, xsel, pbcopy, clip.exe, termux-clipboard-set); install one or pass --clipboard-cmd")
         })
 }
 
