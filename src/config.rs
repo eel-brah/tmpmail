@@ -8,6 +8,11 @@ use serde::Deserialize;
 use crate::error::{Error, Result};
 use crate::provider;
 
+/// Seconds between inbox checks when nothing sets them.
+pub const DEFAULT_POLL_INTERVAL: u64 = 5;
+/// Seconds before a request gives up when nothing sets it.
+pub const DEFAULT_HTTP_TIMEOUT: u64 = 20;
+
 #[derive(Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
@@ -23,6 +28,9 @@ pub struct Config {
     pub timeout: Option<u64>,
     /// Use providers' push streams in `wait` and `watch` (default true).
     pub push: Option<bool>,
+    /// Seconds before a single request to a provider gives up (default 20;
+    /// `TMPMAIL_HTTP_TIMEOUT` wins over it).
+    pub http_timeout: Option<u64>,
 }
 
 impl Config {
@@ -36,8 +44,9 @@ impl Config {
     pub fn load() -> Result<Self> {
         let mut cfg = match Self::path() {
             Some(path) => match std::fs::read_to_string(&path) {
-                Ok(s) => toml::from_str(&s)
-                    .with_context(|| format!("invalid config {}", path.display()))?,
+                Ok(s) => {
+                    Self::parse(&s).with_context(|| format!("invalid config {}", path.display()))?
+                }
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => Config::default(),
                 Err(e) => {
                     return Err(anyhow::Error::from(e)
@@ -72,7 +81,17 @@ impl Config {
                 provider::get(id)?;
             }
         }
+        if cfg.http_timeout == Some(0) {
+            return Err(Error::Usage(
+                "http_timeout in the config must be at least 1 second".into(),
+            ));
+        }
         Ok(cfg)
+    }
+
+    /// Reads a config file's text, without the environment overrides.
+    pub fn parse(s: &str) -> std::result::Result<Self, toml::de::Error> {
+        toml::from_str(s)
     }
 
     pub fn provider_order(&self) -> Vec<String> {
@@ -87,7 +106,9 @@ impl Config {
 
     /// Seconds between checks: the command-line value, else the config, at least 2.
     pub fn poll_interval(&self, cli: Option<u64>) -> u64 {
-        cli.or(self.poll_interval).unwrap_or(5).max(2)
+        cli.or(self.poll_interval)
+            .unwrap_or(DEFAULT_POLL_INTERVAL)
+            .max(2)
     }
 
     pub fn push(&self) -> bool {
@@ -106,5 +127,26 @@ fn env_u64(key: &str) -> Result<Option<u64>> {
             .map(Some)
             .map_err(|_| Error::Usage(format!("{key} must be a number of seconds, got {v:?}"))),
         Err(_) => Ok(None),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_every_key_and_rejects_unknown_ones() {
+        let cfg = Config::parse(
+            "providers = [\"mailtm\"]\npoll_interval = 7\npush = false\nhttp_timeout = 30\n",
+        )
+        .unwrap();
+        assert_eq!(cfg.provider_order(), ["mailtm"]);
+        assert_eq!(cfg.poll_interval(None), 7);
+        assert!(!cfg.push());
+        assert_eq!(cfg.http_timeout, Some(30));
+        assert!(Config::parse("[gui]\ntray = true\n").is_err());
+        let empty = Config::parse("").unwrap();
+        assert_eq!(empty.http_timeout, None);
+        assert_eq!(empty.poll_interval(None), 5);
     }
 }

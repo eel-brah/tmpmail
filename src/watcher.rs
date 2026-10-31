@@ -10,6 +10,7 @@ use std::sync::mpsc::{Receiver, TryRecvError};
 use std::time::{Duration, Instant};
 
 use crate::app::{App, Global};
+use crate::config::Config;
 use crate::error::{Error, Result};
 use crate::provider::{CreateOpts, Summary};
 use crate::push::Poller;
@@ -69,14 +70,29 @@ impl Watcher {
     }
 
     pub fn with_app(app: App) -> Self {
-        let interval = Duration::from_secs(app.config.poll_interval(None));
-        let poller = Poller::new(interval, app.config.push());
+        let poller = Self::poller(&app.config);
         Watcher {
             app,
             poller,
             reloaded: Instant::now(),
             expired: HashSet::new(),
         }
+    }
+
+    fn poller(config: &Config) -> Poller {
+        Poller::new(
+            Duration::from_secs(config.poll_interval(None)),
+            config.push(),
+        )
+    }
+
+    /// Uses a new config (the desktop app's settings) from now on: the poll
+    /// interval, push and the request timeout. The old poller's push
+    /// streams end, and every inbox is listed again on the next turn.
+    pub fn set_config(&mut self, config: Config) {
+        crate::http::set_timeout(config.http_timeout);
+        self.poller = Self::poller(&config);
+        self.app.config = config;
     }
 
     /// Runs until the front end is gone or `rx` is closed.

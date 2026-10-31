@@ -1,4 +1,5 @@
-use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, PoisonError};
 use std::thread::sleep;
 use std::time::Duration;
 
@@ -13,43 +14,61 @@ use crate::render::clean_line;
 const USER_AGENT: &str = concat!("tmpmail/", env!("CARGO_PKG_VERSION"));
 const MAX_RETRIES: u32 = 3;
 
+/// The config's `http_timeout`, 0 while it isn't set.
+static CONFIGURED_TIMEOUT: AtomicU64 = AtomicU64::new(0);
+
+/// Sets the request timeout from the config (`TMPMAIL_HTTP_TIMEOUT` still
+/// wins). Requests made after this use it.
+pub(crate) fn set_timeout(secs: Option<u64>) {
+    CONFIGURED_TIMEOUT.store(secs.unwrap_or(0), Ordering::Relaxed);
+}
+
+/// Seconds per request: the environment, else the config, else 20.
+fn timeout_secs(env: Option<&str>, configured: u64) -> u64 {
+    env.and_then(|v| v.parse().ok())
+        .or((configured > 0).then_some(configured))
+        .unwrap_or(crate::config::DEFAULT_HTTP_TIMEOUT)
+}
+
 /// One client for the whole process, so polling reuses pooled connections
-/// instead of paying a TLS handshake per request.
-fn shared_client() -> &'static Client {
-    static CLIENT: OnceLock<Client> = OnceLock::new();
-    CLIENT.get_or_init(|| {
-        let timeout = std::env::var("TMPMAIL_HTTP_TIMEOUT")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(20);
-        Client::builder()
-            .user_agent(USER_AGENT)
-            .timeout(Duration::from_secs(timeout))
-            .connect_timeout(Duration::from_secs(10))
-            .https_only(!cfg!(test) && std::env::var_os("TMPMAIL_ALLOW_HTTP").is_none())
-            .build()
-            .expect("HTTP client configuration is valid")
-    })
+/// instead of paying a TLS handshake per request. It is built again only if
+/// the timeout changes (the desktop app's settings).
+fn shared_client() -> Client {
+    static CLIENT: Mutex<Option<(u64, Client)>> = Mutex::new(None);
+    let env = std::env::var("TMPMAIL_HTTP_TIMEOUT").ok();
+    let secs = timeout_secs(env.as_deref(), CONFIGURED_TIMEOUT.load(Ordering::Relaxed));
+    let mut client = CLIENT.lock().unwrap_or_else(PoisonError::into_inner);
+    match &*client {
+        Some((s, c)) if *s == secs => c.clone(),
+        _ => {
+            let c = Client::builder()
+                .user_agent(USER_AGENT)
+                .timeout(Duration::from_secs(secs))
+                .connect_timeout(Duration::from_secs(10))
+                .https_only(!cfg!(test) && std::env::var_os("TMPMAIL_ALLOW_HTTP").is_none())
+                .build()
+                .expect("HTTP client configuration is valid");
+            *client = Some((secs, c.clone()));
+            c
+        }
+    }
 }
 
 /// Thin wrapper around a blocking client that turns every failure into a typed
 /// [`Error`] naming the provider, so a dead backend never surfaces as garbage.
 #[derive(Clone)]
 pub struct Http {
-    client: &'static Client,
     provider: &'static str,
 }
 
 impl Http {
     pub fn new(provider: &'static str) -> Self {
-        Http {
-            client: shared_client(),
-            provider,
-        }
+        Http { provider }
     }
 
-    pub fn client(&self) -> &Client {
-        self.client
+    /// The shared client (a cheap handle to the same connection pool).
+    pub fn client(&self) -> Client {
+        shared_client()
     }
 
     /// Sends a request, retrying on 429 (honouring Retry-After) and mapping
@@ -107,8 +126,9 @@ impl Http {
         timeout: Option<Duration>,
     ) -> Result<Value> {
         let body = json!({ "query": query, "variables": variables });
+        let client = self.client();
         let mut v: Value = self.json(|| {
-            let req = self.client.post(url).json(&body);
+            let req = client.post(url).json(&body);
             match timeout {
                 Some(t) => req.timeout(t),
                 None => req,
@@ -215,4 +235,19 @@ fn describe_body(body: &str) -> String {
 
 fn snippet(s: &str) -> String {
     clean_line(&s.chars().take(120).collect::<String>())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_environment_wins_over_the_config_timeout() {
+        assert_eq!(timeout_secs(None, 0), 20);
+        assert_eq!(timeout_secs(None, 45), 45);
+        assert_eq!(timeout_secs(Some("7"), 45), 7);
+        // An unreadable variable is ignored, as before.
+        assert_eq!(timeout_secs(Some("soon"), 45), 45);
+        assert_eq!(timeout_secs(Some("soon"), 0), 20);
+    }
 }

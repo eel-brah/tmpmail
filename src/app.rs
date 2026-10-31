@@ -90,6 +90,7 @@ pub struct InboxView<'a> {
 impl App {
     pub fn new(global: Global) -> Result<Self> {
         let config = Config::load()?;
+        crate::http::set_timeout(config.http_timeout);
         let store = Store::new(Store::default_dir());
         let state = store.load()?;
         let color = !global.no_color

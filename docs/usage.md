@@ -427,7 +427,7 @@ These still work when used as the **first** argument, so old scripts keep runnin
 | `TMPMAIL_DROPMAIL_TOKEN` | Your own DropMail API token, if DropMail asks for a captcha. |
 | `TMPMAIL_PUSH` | `0` turns off push in `wait`/`watch` (see [`wait`](#wait-wait-for-a-message)). Default `1`. |
 | `PAGER` | Pager for long messages in `read`, unless `pager` is set in the config. Default `less` (on Windows, printing directly when `less` isn't installed). |
-| `TMPMAIL_HTTP_TIMEOUT` | Seconds before a single request to a provider gives up. Default 20. |
+| `TMPMAIL_HTTP_TIMEOUT` | Seconds before a single request to a provider gives up. Default 20, or `http_timeout` in the config file. |
 | `NO_COLOR` | Disable colors. |
 
 ## Exit codes
