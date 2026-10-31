@@ -14,6 +14,9 @@ has only been checked by the automated security probe. Please report what breaks
 - **Linux: clicking a notification brings the window to the front** on KDE. The message
   opened, but KWin only flashed the taskbar entry; the app now passes on the activation
   token the notification server sends with the click.
+- **Keyboard shortcuts keep working after a click inside the mail.** They stopped until
+  you clicked elsewhere in the app. Selected mail text is now copied with right-click →
+  Copy, since Ctrl+C goes to the app.
 - **Linux: notifications are labeled "tmpmail"**, not "tmpmail-gui", and KDE and GNOME
   list them under the app's notification settings.
 

@@ -104,7 +104,15 @@ provider that can't (DropMail, tempmail.lol, Maildrop) only forgets it here.
 ### Keyboard shortcuts
 
 The same keys as `tmpmail tui`, off while you type in a field or a dialog is open. `?`
-shows them in the app.
+shows them in the app. They keep working after a click inside the mail: the mail frame
+can't run scripts, so it couldn't pass keys on, and the app takes the keyboard focus back
+as soon as a click puts it there. Links in the mail still open on click, the mail still
+scrolls with the wheel or its scrollbar, and text can still be selected; to copy selected
+mail text, right-click it and choose Copy (Ctrl+C / Cmd+C goes to the app, which says so).
+The frame is out of the Tab order (its web links are all in the Links list), so Tab and
+Shift+Tab move past it, and Esc takes the focus off the mail. The trade: the mail can't be
+scrolled from the keyboard (Space, Page Down; the arrow keys are the app's), only with the
+wheel or the scrollbar.
 
 | Key | Action |
 |---|---|
