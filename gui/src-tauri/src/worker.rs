@@ -1,26 +1,26 @@
-//! The background thread that does all network work, modelled on the TUI's
-//! worker: its own `App`, requests over a channel, every stored inbox polled
-//! (with push where the provider has it), and the state file reloaded every
+//! The background thread that does all network work: the core's shared
+//! worker loop (`tmpmail::watcher`, also behind the TUI) with the window's
+//! requests and events. It owns its own `App`, polls every stored inbox
+//! (with push where the provider has it), and re-reads the state file every
 //! few seconds so changes made by the CLI show up. Results go to the window
 //! as events.
 
+use std::collections::HashMap;
+use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender, channel};
-use std::time::{Duration, Instant};
 
-use serde_json::json;
+use serde_json::{Value, json};
 use tauri::{AppHandle, Emitter, UriSchemeResponder};
 use tmpmail::app::{App, Global};
-use tmpmail::provider::CreateOpts;
-use tmpmail::push::Poller;
+use tmpmail::provider::Summary;
+use tmpmail::watcher::{self, Watcher};
 
 use crate::scheme;
 use crate::{Mails, Shared};
 
-/// How often the state file is re-read for changes made elsewhere.
-const STATE_RELOAD: Duration = Duration::from_secs(5);
-
 pub enum Req {
-    /// Send the inbox list again (the window just loaded).
+    /// The window just loaded: send the inbox list and every inbox's last
+    /// listing again, since events sent before it listened are lost.
     Refresh,
     Create {
         provider: Option<String>,
@@ -41,182 +41,209 @@ pub enum Req {
     },
 }
 
-pub fn spawn(handle: AppHandle, shared: std::sync::Arc<Shared>) -> Sender<Req> {
+/// Starts the worker once its `App` has loaded the config and state, or
+/// returns why they couldn't be loaded.
+pub fn spawn(handle: AppHandle, shared: Arc<Shared>) -> Result<Sender<Req>, String> {
     let (tx, rx) = channel();
+    let (ready_tx, ready_rx) = channel();
     std::thread::Builder::new()
         .name("tmpmail-worker".into())
         .spawn(move || {
-            if let Err(e) = run(&handle, &shared, rx) {
-                notice(&handle, "error", &format!("could not start: {e}"));
-            }
-        })
-        .expect("spawn the worker thread");
-    tx
-}
-
-fn notice(handle: &AppHandle, kind: &str, text: &str) {
-    let _ = handle.emit("notice", json!({ "kind": kind, "text": text }));
-}
-
-fn send_inboxes(handle: &AppHandle, app: &App) {
-    let inboxes: Vec<_> = app.state.inboxes.iter().map(|i| app.view(i)).collect();
-    let _ = handle.emit("inboxes", json!({ "inboxes": inboxes }));
-}
-
-fn run(handle: &AppHandle, shared: &Shared, rx: Receiver<Req>) -> tmpmail::error::Result<()> {
-    let mut app = App::new(Global::default())?;
-    let (log_tx, log_rx) = channel();
-    app.log_to(log_tx);
-    let interval = Duration::from_secs(app.config.poll_interval(None));
-    let mut poller = Poller::new(interval, app.config.push());
-    let mut reloaded = Instant::now();
-    loop {
-        // Of several opens only the last matters: the user moved on.
-        let mut reqs: Vec<Req> = rx.try_iter().collect();
-        if let Some(last) = reqs.iter().rposition(|r| matches!(r, Req::Open { .. })) {
-            let mut k = 0;
-            reqs.retain(|r| {
-                k += 1;
-                !matches!(r, Req::Open { .. }) || k - 1 == last
-            });
-        }
-        for req in reqs {
-            if handle_req(handle, shared, &mut app, &mut poller, req) {
-                send_inboxes(handle, &app);
-            }
-        }
-        for note in log_rx.try_iter() {
-            notice(handle, "info", &note);
-        }
-
-        if reloaded.elapsed() >= STATE_RELOAD {
-            reloaded = Instant::now();
-            if let Ok(state) = app.store.load() {
-                let addresses = |s: &tmpmail::store::State| -> Vec<(String, Option<String>)> {
-                    s.inboxes
-                        .iter()
-                        .map(|i| (i.address.clone(), i.label.clone()))
-                        .collect()
-                };
-                let changed =
-                    addresses(&state) != addresses(&app.state) || state.active != app.state.active;
-                app.state = state;
-                if changed {
-                    send_inboxes(handle, &app);
+            // Built here: an `App` can't move between threads.
+            let mut w = match Watcher::new(Global::default()) {
+                Ok(w) => w,
+                Err(e) => {
+                    let _ = ready_tx.send(Err(e.to_string()));
+                    return;
                 }
-            }
-        }
-
-        for n in 0..app.state.inboxes.len() {
-            let address = app.state.inboxes[n].address.clone();
-            if app.state.inboxes[n].is_expired() || !poller.is_due(&address) {
-                continue;
-            }
-            let result = app.with_inbox_at(n, |p, inbox| {
-                let list = App::sorted_list(p, inbox)?;
-                poller.subscribe(p, inbox);
-                Ok(list)
-            });
-            poller.polled(&address, result.is_ok());
-            let payload = match result {
-                Ok(list) => {
-                    json!({ "address": address, "live": poller.is_live(&address), "messages": list })
-                }
-                Err(e) => json!({ "address": address, "error": e.to_string() }),
             };
-            if handle.emit("messages", payload).is_err() {
-                return Ok(()); // the window is gone
-            }
-        }
-        // Short naps so requests from the window are picked up quickly.
-        poller.sleep(Some(Instant::now() + Duration::from_millis(100)));
+            let _ = ready_tx.send(Ok(()));
+            let (log_tx, log) = channel();
+            w.app.log_to(log_tx);
+            w.run(
+                &rx,
+                &mut Front {
+                    handle,
+                    shared,
+                    log,
+                    last: HashMap::new(),
+                },
+            );
+        })
+        .map_err(|e| format!("could not start the worker: {e}"))?;
+    match ready_rx.recv() {
+        Ok(Ok(())) => Ok(tx),
+        Ok(Err(e)) => Err(e),
+        Err(_) => Err("the worker stopped".into()),
     }
 }
 
-/// Carries out one request. Returns whether the inbox list changed.
-fn handle_req(
-    handle: &AppHandle,
-    shared: &Shared,
-    app: &mut App,
-    poller: &mut Poller,
-    req: Req,
-) -> bool {
-    match req {
-        Req::Refresh => true,
-        Req::Select { address } => {
-            poller.forget(&address); // due now
-            false
+/// The window's side of the shared loop.
+struct Front {
+    handle: AppHandle,
+    shared: Arc<Shared>,
+    log: Receiver<String>,
+    /// The last `messages` event of each inbox, for `Req::Refresh`.
+    last: HashMap<String, Value>,
+}
+
+impl Front {
+    fn messages(&mut self, address: String, payload: Value) -> bool {
+        let ok = self.handle.emit("messages", &payload).is_ok();
+        self.last.insert(address, payload);
+        ok
+    }
+
+    fn notice(&self, kind: &str, text: &str) {
+        let _ = self
+            .handle
+            .emit("notice", json!({ "kind": kind, "text": text }));
+    }
+}
+
+impl watcher::Front for Front {
+    type Req = Req;
+
+    fn is_open(req: &Req) -> bool {
+        matches!(req, Req::Open { .. })
+    }
+
+    fn inboxes(&mut self, app: &App) -> bool {
+        let inboxes: Vec<_> = app.state.inboxes.iter().map(|i| app.view(i)).collect();
+        self.handle
+            .emit("inboxes", json!({ "inboxes": inboxes }))
+            .is_ok()
+    }
+
+    fn listed(
+        &mut self,
+        address: String,
+        result: Result<Vec<Summary>, String>,
+        live: bool,
+    ) -> bool {
+        let payload = match result {
+            Ok(list) => json!({ "address": address, "live": live, "messages": list }),
+            Err(e) => json!({ "address": address, "live": live, "error": e }),
+        };
+        self.messages(address, payload)
+    }
+
+    fn expired(&mut self, address: &str) -> bool {
+        let payload = json!({ "address": address, "expired": true });
+        self.messages(address.to_string(), payload)
+    }
+
+    fn turn(&mut self) {
+        let notes: Vec<String> = self.log.try_iter().collect();
+        for note in notes {
+            self.notice("info", &note);
         }
-        Req::Create { provider } => {
-            match app.create_with_fallback(provider.as_deref(), None, &CreateOpts::default()) {
-                Ok(inbox) => {
-                    let address = inbox.address.clone();
-                    match app.store.update(|s| s.add(inbox)) {
-                        Ok((state, ())) => {
-                            app.state = state;
-                            let _ = handle.emit("created", json!({ "address": address }));
-                        }
-                        Err(e) => {
-                            notice(handle, "error", &format!("could not save the inbox: {e}"))
-                        }
+    }
+
+    fn handle(&mut self, w: &mut Watcher, req: Req) -> bool {
+        match req {
+            Req::Refresh => {
+                // Inboxes not listed yet are listed on their own soon.
+                for inbox in &w.app.state.inboxes {
+                    if let Some(payload) = self.last.get(&inbox.address) {
+                        let _ = self.handle.emit("messages", payload);
                     }
                 }
-                Err(e) => notice(handle, "error", &format!("could not create an inbox: {e}")),
+                true
             }
-            true
-        }
-        Req::Open { address, id } => {
-            let Some(n) = app.state.position(&address) else {
-                return false;
-            };
-            let payload = match app.with_inbox_at(n, |p, inbox| p.get(inbox, &id)) {
-                Ok(msg) => {
-                    let key = shared
-                        .mails
-                        .lock()
-                        .expect("mails lock")
-                        .insert(Mails::entry(&address, msg.clone()));
-                    json!({
-                        "address": address,
-                        "id": id,
-                        "key": key,
-                        "from": msg.from,
-                        "to": msg.to,
-                        "subject": msg.subject,
-                        "date": msg.date,
-                        "attachments": msg.attachments,
-                    })
+            Req::Select { address } => {
+                w.poll_now(&address);
+                false
+            }
+            Req::Create { provider } => {
+                match w.create(provider.as_deref()) {
+                    Ok(address) => {
+                        let _ = self.handle.emit("created", json!({ "address": address }));
+                    }
+                    Err(e) => self.notice("error", &e),
                 }
-                Err(e) => json!({ "address": address, "id": id, "error": e.to_string() }),
-            };
-            let _ = handle.emit("opened", payload);
-            false
+                true
+            }
+            Req::Open { address, id } => {
+                self.open(&mut w.app, address, id);
+                false
+            }
+            Req::Inline {
+                key,
+                cid,
+                responder,
+            } => {
+                self.inline(&mut w.app, key, cid, responder);
+                false
+            }
         }
-        Req::Inline {
-            key,
-            cid,
-            responder,
-        } => {
-            let found = {
-                let mails = shared.mails.lock().expect("mails lock");
-                mails.get(key).and_then(|m| {
-                    let att = scheme::find_inline(&m.msg, &cid)?.clone();
-                    Some((m.address.clone(), m.msg.clone(), att))
-                })
-            };
-            let Some((address, msg, att)) = found else {
-                responder.respond(scheme::not_found());
-                return false;
-            };
-            let bytes = app.state.position(&address).and_then(|n| {
-                app.with_inbox_at(n, |p, inbox| p.attachment(inbox, &msg, &att))
-                    .ok()
-            });
-            responder.respond(match bytes {
-                Some(b) => scheme::image(&att.content_type, b),
-                None => scheme::not_found(),
-            });
-            false
+    }
+}
+
+impl Front {
+    fn open(&self, app: &mut App, address: String, id: String) {
+        let Some(n) = app.state.position(&address) else {
+            return;
+        };
+        let payload = match app.with_inbox_at(n, |p, inbox| p.get(inbox, &id)) {
+            Ok(msg) => {
+                let mut event = json!({
+                    "address": address,
+                    "id": id,
+                    "from": msg.from,
+                    "to": msg.to,
+                    "subject": msg.subject,
+                    "date": msg.date,
+                    "attachments": msg.attachments,
+                });
+                let key = self
+                    .shared
+                    .mails
+                    .lock()
+                    .expect("mails lock")
+                    .insert(Mails::entry(&address, msg));
+                event["key"] = json!(key);
+                event
+            }
+            Err(e) => json!({ "address": address, "id": id, "error": e.to_string() }),
+        };
+        let _ = self.handle.emit("opened", payload);
+    }
+
+    /// Serves an inline image, fetching it from the provider the first
+    /// time and keeping it with the message after that.
+    fn inline(&self, app: &mut App, key: u64, cid: String, responder: UriSchemeResponder) {
+        let found = {
+            let mails = self.shared.mails.lock().expect("mails lock");
+            mails.get(key).map(|m| {
+                (
+                    m.inline.get(&cid).cloned(),
+                    m.address.clone(),
+                    m.msg.clone(),
+                )
+            })
+        };
+        let (address, msg) = match found {
+            None => return responder.respond(scheme::not_found()),
+            // Fetched while this request was queued.
+            Some((Some((mime, bytes)), ..)) => {
+                return responder.respond(scheme::image(&mime, bytes));
+            }
+            Some((None, address, msg)) => (address, msg),
+        };
+        let Some((att, mime)) = scheme::find_inline(&msg, &cid) else {
+            return responder.respond(scheme::not_found());
+        };
+        let bytes = app.state.position(&address).and_then(|n| {
+            app.with_inbox_at(n, |p, inbox| p.attachment(inbox, &msg, att))
+                .ok()
+        });
+        let Some(bytes) = bytes else {
+            return responder.respond(scheme::not_found());
+        };
+        if let Some(m) = self.shared.mails.lock().expect("mails lock").get_mut(key) {
+            m.inline.insert(cid, (mime.clone(), bytes.clone()));
         }
+        responder.respond(scheme::image(&mime, bytes));
     }
 }

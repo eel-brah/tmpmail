@@ -162,6 +162,11 @@ impl Poller {
         );
     }
 
+    /// Makes `address` due now, keeping its push stream.
+    pub fn poll_now(&mut self, address: &str) {
+        self.due.remove(address);
+    }
+
     /// Stops following `address` (it was dropped or rotated away).
     pub fn forget(&mut self, address: &str) {
         self.due.remove(address);

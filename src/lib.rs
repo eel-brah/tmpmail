@@ -3,14 +3,12 @@
 //! command line, the TUI and the MCP server; the desktop app uses the core
 //! without them.
 
-// Without the CLI some helpers have no caller; the full build checks them.
-#![cfg_attr(not(feature = "cli"), allow(dead_code, unused_imports))]
-
 pub mod app;
 #[cfg(feature = "cli")]
 pub mod cli;
 pub mod config;
 pub mod error;
+#[cfg(feature = "cli")]
 mod extract;
 mod http;
 #[cfg(feature = "cli")]
@@ -19,6 +17,8 @@ pub mod provider;
 pub mod push;
 pub mod render;
 pub mod store;
+#[cfg(feature = "cli")]
 mod system;
 #[cfg(feature = "cli")]
 mod tui;
+pub mod watcher;

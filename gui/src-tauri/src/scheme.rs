@@ -73,13 +73,18 @@ pub fn handle(
     match segments.as_slice() {
         ["mail", key] => {
             let images = query.split('&').any(|kv| kv == "images=1");
-            let doc = key.parse().ok().and_then(|key| {
+            let found = key.parse().ok().and_then(|key| {
                 let mails = shared.mails.lock().expect("mails lock");
-                mails.get(key).map(|m| mail_document(&m.msg, key))
+                mails.get(key).map(|m| (key, m.msg.clone()))
             });
-            responder.respond(match doc {
-                Some(doc) => document(&doc(images), &mail_csp(images)),
-                None => not_found(),
+            let Some((key, msg)) = found else {
+                return responder.respond(not_found());
+            };
+            // Sanitizing a big mail takes a while: not on the webview's
+            // thread.
+            tauri::async_runtime::spawn_blocking(move || {
+                let doc = mail_document(&msg, key, images);
+                responder.respond(document(&doc, &mail_csp(images)));
             });
         }
         ["mail", key, "cid", cid] => {
@@ -115,24 +120,26 @@ pub fn handle(
     }
 }
 
-/// The sanitized document for `msg`, as a function of the images flag.
-fn mail_document(msg: &Message, key: u64) -> impl Fn(bool) -> String + use<> {
+/// The sanitized document for `msg`.
+fn mail_document(msg: &Message, key: u64, images: bool) -> String {
+    let text;
     let html = match (&msg.html, &msg.text) {
-        (Some(h), _) => h.clone(),
-        (None, Some(t)) => format!("<pre>{}</pre>", escape_html(t)),
-        (None, None) => String::new(),
+        (Some(h), _) => h.as_str(),
+        (None, Some(t)) => {
+            text = format!("<pre>{}</pre>", escape_html(t));
+            text.as_str()
+        }
+        (None, None) => "",
     };
     let cid_base = format!("{}/mail/{key}/cid/", origin());
-    move |images| {
-        let body = sanitize_mail_html(
-            &html,
-            images,
-            Some(&Frame {
-                cid_base: &cid_base,
-            }),
-        );
-        wrap(&body)
-    }
+    let body = sanitize_mail_html(
+        html,
+        images,
+        Some(&Frame {
+            cid_base: &cid_base,
+        }),
+    );
+    wrap(&body)
 }
 
 /// A full document around a sanitized body.
@@ -193,15 +200,41 @@ pub fn not_found() -> Response<Vec<u8>> {
     status(StatusCode::NOT_FOUND)
 }
 
-/// The attachment a `cid:` reference most likely means. Providers don't
-/// report Content-ID headers, so this matches the attachment id or file
-/// name against the cid or its part before `@`.
-pub fn find_inline<'a>(msg: &'a Message, cid: &str) -> Option<&'a Attachment> {
+/// The attachment a `cid:` reference most likely means, and the image type
+/// to serve it as. Providers don't report Content-ID headers, so this
+/// matches the attachment id or file name against the cid or its part
+/// before `@`.
+pub fn find_inline<'a>(msg: &'a Message, cid: &str) -> Option<(&'a Attachment, String)> {
     let short = cid.split('@').next().unwrap_or(cid);
-    msg.attachments.iter().find(|a| {
-        a.content_type.starts_with("image/")
-            && [cid, short].iter().any(|c| a.id == *c || a.filename == *c)
-    })
+    msg.attachments
+        .iter()
+        .filter(|a| [cid, short].iter().any(|c| a.id == *c || a.filename == *c))
+        .find_map(|a| Some((a, inline_type(a)?)))
+}
+
+/// The raster image type an inline attachment is served as: its own, or
+/// for `application/octet-stream` one known from its file extension. Never
+/// SVG (it can carry script) and never anything that isn't an image.
+fn inline_type(a: &Attachment) -> Option<String> {
+    let ct = a.content_type.split(';').next().unwrap_or_default();
+    let ct = ct.trim().to_ascii_lowercase();
+    if ct.starts_with("image/") {
+        return (!ct.contains("svg")).then_some(ct);
+    }
+    if ct != "application/octet-stream" {
+        return None;
+    }
+    let ext = a.filename.rsplit_once('.')?.1.to_ascii_lowercase();
+    let mime = match ext.as_str() {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "bmp" => "image/bmp",
+        "avif" => "image/avif",
+        _ => return None,
+    };
+    Some(mime.to_string())
 }
 
 fn percent_decode(s: &str) -> Option<String> {
@@ -229,6 +262,43 @@ mod tests {
     fn cid_ids_round_trip() {
         assert_eq!(percent_decode("logo%40x%20y").as_deref(), Some("logo@x y"));
         assert_eq!(percent_decode("bad%4"), None);
+    }
+
+    fn attachment(filename: &str, content_type: &str) -> Attachment {
+        Attachment {
+            id: format!("id-{filename}"),
+            filename: filename.into(),
+            content_type: content_type.into(),
+            size: None,
+            url: None,
+        }
+    }
+
+    #[test]
+    fn inline_images_are_raster_images_only() {
+        let msg = Message {
+            attachments: vec![
+                attachment("logo.png", "image/png; name=logo.png"),
+                attachment("photo.JPG", "application/octet-stream"),
+                attachment("x.svg", "image/svg+xml"),
+                attachment("y.svg", "application/octet-stream"),
+                attachment("page.html", "text/html"),
+            ],
+            ..Default::default()
+        };
+        let find = |cid: &str| find_inline(&msg, cid).map(|(a, t)| (a.filename.clone(), t));
+        assert_eq!(
+            find("logo.png@x"),
+            Some(("logo.png".into(), "image/png".into()))
+        );
+        assert_eq!(
+            find("id-photo.JPG"),
+            Some(("photo.JPG".into(), "image/jpeg".into()))
+        );
+        assert_eq!(find("x.svg"), None);
+        assert_eq!(find("y.svg"), None);
+        assert_eq!(find("page.html"), None);
+        assert_eq!(find("nothing"), None);
     }
 
     #[test]

@@ -239,13 +239,20 @@ impl Probe {
         });
         let remote_hit = |v: &str| remote.iter().any(|r| r.contains(&format!("{v}-remote")));
 
-        let sanitized = sanitize_mail_html(
-            &self.hostile_html("check"),
-            false,
-            Some(&Frame {
-                cid_base: "tmpmail-mail://localhost/mail/0/cid/",
-            }),
-        );
+        // The sanitizer on its own: the frames above can't tell it from the
+        // CSP, which blocks the probe's http "remote" image either way.
+        let frame = Frame {
+            cid_base: "tmpmail-mail://localhost/mail/0/cid/",
+        };
+        let hostile = self.hostile_html("check");
+        let sanitized = sanitize_mail_html(&hostile, false, Some(&frame));
+        let sanitized_images = sanitize_mail_html(&hostile, true, Some(&frame));
+        let remote_base = self.remote_base.lock().unwrap().clone();
+        let https_img = r#"<img src="https://tmpmail.invalid/x.png">"#;
+        let https_kept = sanitize_mail_html(https_img, true, Some(&frame))
+            .contains("https://tmpmail.invalid/x.png");
+        let https_dropped =
+            !sanitize_mail_html(https_img, false, Some(&frame)).contains("tmpmail.invalid");
         let windows = app.webview_windows().len();
 
         let checks = json!({
@@ -257,7 +264,10 @@ impl Probe {
             "internals_absent_in_sandboxed_frame": has("raw_scripts-internals-absent") && !has("raw_scripts-invoke-ok"),
             "no_invoke_from_any_frame": !hits.iter().any(|h| h.ends_with("-invoke-ok")),
             "init_called_once": self.init_calls.load(Ordering::SeqCst) == 1,
-            "remote_image_not_loaded": !remote_hit("real"),
+            "remote_image_not_loaded": !remote_hit("real") && !remote_hit("real_images"),
+            "sanitizer_drops_remote_images": !sanitized.contains(&remote_base) && https_dropped,
+            "sanitizer_drops_http_images_with_images_on": !sanitized_images.contains(&remote_base),
+            "sanitizer_keeps_https_images_with_images_on": https_kept,
             "cid_image_served": cid_served,
             "sanitizer_sets_target_blank": sanitized.contains(r#"target="_blank""#),
             "sanitizer_drops_javascript_links": !sanitized.contains("href=\"javascript"),
@@ -284,7 +294,6 @@ impl Probe {
             "observations": {
                 "inline_style_block_applies_under_csp_header": has("raw_csp-style-block"),
                 "inline_style_attr_applies_in_real_frame": has("real_images-style-attr"),
-                "remote_image_loaded_with_images_on": remote_hit("real_images"),
                 "internals_in_unsandboxed_frame": if has("raw_open-internals-present") { "present" } else if has("raw_open-internals-absent") { "absent" } else { "unknown" },
                 "popups_reaching_on_new_window": popups,
                 "webview_windows": windows,

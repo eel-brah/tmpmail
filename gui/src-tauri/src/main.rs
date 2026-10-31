@@ -30,6 +30,8 @@ const KEEP_MAILS: usize = 32;
 /// State shared by the commands, the scheme handler and the worker.
 pub struct Shared {
     pub worker: OnceLock<Sender<Req>>,
+    /// Why the worker couldn't start (an unreadable config or state file).
+    pub start_error: OnceLock<String>,
     pub mails: Mutex<Mails>,
     #[cfg(debug_assertions)]
     pub probe: Option<probe::Probe>,
@@ -38,7 +40,8 @@ pub struct Shared {
 /// An opened message, kept so the scheme can serve it and its images.
 pub struct Mail {
     pub address: String,
-    pub msg: Message,
+    /// Shared so the scheme and the worker can use it without the lock.
+    pub msg: Arc<Message>,
     /// Inline images already in memory, by content id: (type, bytes).
     pub inline: HashMap<String, (String, Vec<u8>)>,
 }
@@ -55,7 +58,7 @@ impl Mails {
     pub fn entry(address: &str, msg: Message) -> Mail {
         Mail {
             address: address.to_string(),
-            msg,
+            msg: Arc::new(msg),
             inline: HashMap::new(),
         }
     }
@@ -72,9 +75,16 @@ impl Mails {
     pub fn get(&self, key: u64) -> Option<&Mail> {
         self.map.get(&key)
     }
+
+    pub fn get_mut(&mut self, key: u64) -> Option<&mut Mail> {
+        self.map.get_mut(&key)
+    }
 }
 
 fn send(shared: &Shared, req: Req) -> Result<(), String> {
+    if let Some(e) = shared.start_error.get() {
+        return Err(e.clone());
+    }
     shared
         .worker
         .get()
@@ -84,8 +94,9 @@ fn send(shared: &Shared, req: Req) -> Result<(), String> {
 }
 
 /// What the window needs to start: the mail scheme's origin and the
-/// providers. Also asks the worker for the inbox list, since the window
-/// listens for events only once it has loaded.
+/// providers. Also asks the worker for the inbox list and every inbox's
+/// mail, since the window listens for events only once it has loaded.
+/// Fails with the reason if the config or state couldn't be loaded.
 #[tauri::command]
 fn init(shared: State<'_, Arc<Shared>>) -> Result<Value, String> {
     #[cfg(debug_assertions)]
@@ -129,10 +140,13 @@ fn app_page(url: &Url) -> bool {
     match url.scheme() {
         "tauri" => host == "localhost",
         "http" | "https" if host == "tauri.localhost" => true,
-        "http" if cfg!(debug_assertions) => host == "localhost" && url.port() == Some(1420),
-        // The mail frame's own loads, on engines that report them here.
+        // The mail frame's own loads, on engines that report them here
+        // (WebView2 maps the scheme to http), and Vite in debug builds.
         scheme::SCHEME => host == "localhost",
-        "http" => host == "tmpmail-mail.localhost",
+        "http" => {
+            host == "tmpmail-mail.localhost"
+                || cfg!(debug_assertions) && host == "localhost" && url.port() == Some(1420)
+        }
         _ => false,
     }
 }
@@ -157,6 +171,7 @@ fn popup(app: &tauri::AppHandle, shared: &Shared, url: &Url) {
 fn main() {
     let shared = Arc::new(Shared {
         worker: OnceLock::new(),
+        start_error: OnceLock::new(),
         mails: Mutex::new(Mails::default()),
         #[cfg(debug_assertions)]
         probe: probe::Probe::from_env(),
@@ -191,8 +206,14 @@ fn main() {
             if let Some(p) = &shared.probe {
                 p.start(app.handle().clone(), &shared);
             }
-            let tx = worker::spawn(app.handle().clone(), shared.clone());
-            let _ = shared.worker.set(tx);
+            match worker::spawn(app.handle().clone(), shared.clone()) {
+                Ok(tx) => {
+                    let _ = shared.worker.set(tx);
+                }
+                Err(e) => {
+                    let _ = shared.start_error.set(e);
+                }
+            }
 
             let handle = app.handle().clone();
             let for_popups = shared.clone();
@@ -226,5 +247,24 @@ fn main() {
     if let Err(e) = result {
         eprintln!("tmpmail-gui: {e}");
         std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_the_apps_own_pages_load() {
+        let ok = |u: &str| app_page(&Url::parse(u).unwrap());
+        assert!(ok("tauri://localhost/index.html"));
+        assert!(ok("http://tauri.localhost/index.html"));
+        assert!(ok("tmpmail-mail://localhost/mail/1"));
+        // The mail origin on Windows, in debug builds too.
+        assert!(ok("http://tmpmail-mail.localhost/mail/1"));
+        assert_eq!(ok("http://localhost:1420/"), cfg!(debug_assertions));
+        assert!(!ok("http://localhost:8080/"));
+        assert!(!ok("https://example.com/"));
+        assert!(!ok("tmpmail-mail://evil/mail/1"));
     }
 }

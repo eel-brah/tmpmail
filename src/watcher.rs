@@ -1,0 +1,355 @@
+//! The background loop shared by the TUI and the desktop app: their worker
+//! thread owns an [`App`] and a [`Poller`], carries out the front end's
+//! requests, re-reads the state file so changes made by another tmpmail show
+//! up, and lists every stored inbox on the same schedule as `watch` (push
+//! where the provider has it). What a front end asks for and how it is told
+//! about results is up to its [`Front`].
+
+use std::collections::HashSet;
+use std::sync::mpsc::{Receiver, TryRecvError};
+use std::time::{Duration, Instant};
+
+use crate::app::{App, Global};
+use crate::error::Result;
+use crate::provider::{CreateOpts, Summary};
+use crate::push::Poller;
+
+/// How often the state file is re-read for inboxes another tmpmail added
+/// or dropped.
+const STATE_RELOAD: Duration = Duration::from_secs(5);
+/// The longest nap between turns, so requests are picked up quickly.
+const NAP: Duration = Duration::from_millis(100);
+
+/// One front end's side of the loop.
+pub trait Front {
+    type Req;
+
+    /// Whether `req` opens a message. Of several queued opens only the last
+    /// is carried out: the user moved on.
+    fn is_open(req: &Self::Req) -> bool;
+
+    /// Carries out one request. Returns whether the inbox list changed.
+    fn handle(&mut self, w: &mut Watcher, req: Self::Req) -> bool;
+
+    /// The inbox list changed (or was asked for). Returns false once the
+    /// front end is gone.
+    fn inboxes(&mut self, app: &App) -> bool;
+
+    /// An inbox was listed. `live` is whether its push stream is connected.
+    /// Returns false once the front end is gone.
+    fn listed(
+        &mut self,
+        address: String,
+        result: std::result::Result<Vec<Summary>, String>,
+        live: bool,
+    ) -> bool;
+
+    /// An inbox has expired and is no longer listed. Called once each time
+    /// an inbox expires. Returns false once the front end is gone.
+    fn expired(&mut self, _address: &str) -> bool {
+        true
+    }
+
+    /// Called once per turn, after the requests.
+    fn turn(&mut self) {}
+}
+
+pub struct Watcher {
+    pub app: App,
+    pub poller: Poller,
+    reloaded: Instant,
+    /// Expired inboxes the front end was told about.
+    expired: HashSet<String>,
+}
+
+impl Watcher {
+    /// Loads the config and state, as `App::new` does.
+    pub fn new(global: Global) -> Result<Self> {
+        Ok(Self::with_app(App::new(global)?))
+    }
+
+    pub fn with_app(app: App) -> Self {
+        let interval = Duration::from_secs(app.config.poll_interval(None));
+        let poller = Poller::new(interval, app.config.push());
+        Watcher {
+            app,
+            poller,
+            reloaded: Instant::now(),
+            expired: HashSet::new(),
+        }
+    }
+
+    /// Runs until the front end is gone or `rx` is closed.
+    pub fn run<F: Front>(&mut self, rx: &Receiver<F::Req>, front: &mut F) {
+        if !front.inboxes(&self.app) {
+            return;
+        }
+        loop {
+            let mut reqs = Vec::new();
+            loop {
+                match rx.try_recv() {
+                    Ok(req) => reqs.push(req),
+                    Err(TryRecvError::Empty) => break,
+                    Err(TryRecvError::Disconnected) => return,
+                }
+            }
+            let last = reqs.iter().rposition(F::is_open);
+            let reqs = reqs
+                .into_iter()
+                .enumerate()
+                .filter(|(i, r)| !F::is_open(r) || Some(*i) == last)
+                .map(|(_, r)| r);
+            for req in reqs {
+                if front.handle(self, req) {
+                    front.inboxes(&self.app);
+                }
+            }
+            front.turn();
+
+            if self.reloaded.elapsed() >= STATE_RELOAD {
+                self.reloaded = Instant::now();
+                if self.reload() && !front.inboxes(&self.app) {
+                    return;
+                }
+            }
+
+            if !self.poll_due(front) {
+                return;
+            }
+            self.poller.sleep(Some(Instant::now() + NAP));
+        }
+    }
+
+    /// Re-reads the state file, and stops following inboxes that are gone
+    /// from it. Returns whether the inbox list (addresses, labels or the
+    /// active inbox) changed.
+    fn reload(&mut self) -> bool {
+        let Ok(state) = self.app.store.load() else {
+            return false;
+        };
+        let addresses = |s: &crate::store::State| -> Vec<(String, Option<String>)> {
+            s.inboxes
+                .iter()
+                .map(|i| (i.address.clone(), i.label.clone()))
+                .collect()
+        };
+        let changed = addresses(&state) != addresses(&self.app.state)
+            || state.active != self.app.state.active;
+        for old in &self.app.state.inboxes {
+            if state.position(&old.address).is_none() {
+                self.poller.forget(&old.address);
+                self.expired.remove(&old.address);
+            }
+        }
+        self.app.state = state;
+        changed
+    }
+
+    /// Lists every inbox that is due. Returns false once the front end is
+    /// gone.
+    fn poll_due<F: Front>(&mut self, front: &mut F) -> bool {
+        for n in 0..self.app.state.inboxes.len() {
+            let address = self.app.state.inboxes[n].address.clone();
+            if self.app.state.inboxes[n].is_expired() {
+                if self.expired.insert(address.clone()) {
+                    self.poller.forget(&address); // ends its push stream
+                    if !front.expired(&address) {
+                        return false;
+                    }
+                }
+                continue;
+            }
+            // Renewed (another tmpmail refreshed it): report a new expiry.
+            self.expired.remove(&address);
+            if !self.poller.is_due(&address) {
+                continue;
+            }
+            let poller = &mut self.poller;
+            let result = self.app.with_inbox_at(n, |p, inbox| {
+                let list = App::sorted_list(p, inbox)?;
+                poller.subscribe(p, inbox);
+                Ok(list)
+            });
+            self.poller.polled(&address, result.is_ok());
+            let live = self.poller.is_live(&address);
+            if !front.listed(address, result.map_err(|e| e.to_string()), live) {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Lists `address` on the next turn, keeping its push stream.
+    pub fn poll_now(&mut self, address: &str) {
+        self.poller.poll_now(address);
+    }
+
+    /// Creates an inbox at `provider` (or the first that works) and saves
+    /// it as the active one. Returns its address, or what went wrong.
+    pub fn create(&mut self, provider: Option<&str>) -> std::result::Result<String, String> {
+        let inbox = self
+            .app
+            .create_with_fallback(provider, None, &CreateOpts::default())
+            .map_err(|e| format!("could not create an inbox: {e}"))?;
+        let address = inbox.address.clone();
+        let (state, ()) = self
+            .app
+            .store
+            .update(|s| s.add(inbox))
+            .map_err(|e| format!("could not save the new inbox: {e}"))?;
+        self.app.state = state;
+        Ok(address)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::provider::{Capabilities, Inbox, Message, Provider};
+    use std::sync::mpsc::{Sender, channel};
+
+    /// Lists one message per inbox and counts the listings.
+    struct Fake {
+        lists: Sender<String>,
+    }
+
+    impl Provider for Fake {
+        fn id(&self) -> &'static str {
+            "fake"
+        }
+        fn name(&self) -> &'static str {
+            "Fake"
+        }
+        fn website(&self) -> &'static str {
+            ""
+        }
+        fn caps(&self) -> Capabilities {
+            unimplemented!()
+        }
+        fn domains(&self) -> Result<Vec<String>> {
+            unimplemented!()
+        }
+        fn create(&self, _: &CreateOpts) -> Result<Inbox> {
+            unimplemented!()
+        }
+        fn list(&self, inbox: &mut Inbox) -> Result<Vec<Summary>> {
+            let _ = self.lists.send(inbox.address.clone());
+            Ok(vec![Summary {
+                id: "1".into(),
+                subject: "hi".into(),
+                ..Default::default()
+            }])
+        }
+        fn get(&self, _: &mut Inbox, id: &str) -> Result<Message> {
+            Ok(Message {
+                id: id.into(),
+                ..Default::default()
+            })
+        }
+    }
+
+    #[derive(Debug, PartialEq)]
+    enum Ev {
+        Inboxes(usize),
+        Listed(String, usize),
+        Expired(String),
+        Opened(String),
+    }
+
+    enum Req {
+        Open(String),
+        Poke(String),
+    }
+
+    struct Test {
+        tx: Sender<Ev>,
+    }
+
+    impl Front for Test {
+        type Req = Req;
+        fn is_open(req: &Req) -> bool {
+            matches!(req, Req::Open(_))
+        }
+        fn handle(&mut self, w: &mut Watcher, req: Req) -> bool {
+            match req {
+                Req::Open(id) => {
+                    let _ = self.tx.send(Ev::Opened(id));
+                }
+                Req::Poke(address) => w.poll_now(&address),
+            }
+            false
+        }
+        fn inboxes(&mut self, app: &App) -> bool {
+            self.tx.send(Ev::Inboxes(app.state.inboxes.len())).is_ok()
+        }
+        fn listed(
+            &mut self,
+            address: String,
+            result: std::result::Result<Vec<Summary>, String>,
+            _live: bool,
+        ) -> bool {
+            let n = result.map_or(0, |l| l.len());
+            self.tx.send(Ev::Listed(address, n)).is_ok()
+        }
+        fn expired(&mut self, address: &str) -> bool {
+            self.tx.send(Ev::Expired(address.into())).is_ok()
+        }
+    }
+
+    fn next(rx: &std::sync::mpsc::Receiver<Ev>) -> Ev {
+        rx.recv_timeout(Duration::from_secs(5)).expect("an event")
+    }
+
+    #[test]
+    fn the_loop_lists_dedups_opens_and_reports_expired_inboxes_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().to_path_buf();
+        let (lists_tx, lists) = channel();
+        let (req_tx, req_rx) = channel();
+        let (ev_tx, ev_rx) = channel();
+        // Queued before the loop starts: only the last open is carried out.
+        req_tx.send(Req::Open("1".into())).unwrap();
+        req_tx.send(Req::Open("2".into())).unwrap();
+        // `App` stays on its thread (providers aren't `Send`).
+        let worker = std::thread::spawn(move || {
+            let mut app = App::for_test(path);
+            app.set_provider(Box::new(Fake { lists: lists_tx }));
+            let mut old = Inbox::new("fake", "old@x.com".into(), serde_json::Value::Null);
+            old.expires_at = Some(chrono::Utc::now() - chrono::Duration::minutes(1));
+            let a = Inbox::new("fake", "a@x.com".into(), serde_json::Value::Null);
+            // Saved, so a state reload on a slow machine changes nothing.
+            let (state, ()) = app
+                .store
+                .update(|s| {
+                    s.add(a);
+                    s.add(old);
+                })
+                .unwrap();
+            app.state = state;
+            Watcher::with_app(app).run(&req_rx, &mut Test { tx: ev_tx });
+        });
+
+        assert_eq!(next(&ev_rx), Ev::Inboxes(2));
+        assert_eq!(next(&ev_rx), Ev::Opened("2".into()));
+        assert_eq!(next(&ev_rx), Ev::Listed("a@x.com".into(), 1));
+        assert_eq!(next(&ev_rx), Ev::Expired("old@x.com".into()));
+        assert_eq!(lists.recv().unwrap(), "a@x.com");
+
+        // Not due again for a while, unless asked; the expired inbox is
+        // reported only once.
+        req_tx.send(Req::Poke("a@x.com".into())).unwrap();
+        assert_eq!(next(&ev_rx), Ev::Listed("a@x.com".into(), 1));
+        assert!(
+            ev_rx.recv_timeout(Duration::from_millis(300)).is_err(),
+            "nothing else is due"
+        );
+        assert_eq!(
+            lists.try_iter().count(),
+            1,
+            "the expired inbox is never listed"
+        );
+
+        drop(req_tx);
+        worker.join().unwrap();
+    }
+}

@@ -23,7 +23,8 @@ pnpm lint             # eslint, with svelte/no-at-html-tags as an error
 pnpm tauri build --debug --no-bundle   # target/debug/tmpmail-gui with the built frontend
 ```
 
-`TMPMAIL_STATE_DIR` and `TMPMAIL_CONFIG` work as for the CLI, and `TMPMAIL_GUI_LOG=1` prints
+`TMPMAIL_STATE_DIR` and `TMPMAIL_CONFIG` work as for the CLI (if either can't be read, the
+window says why instead of starting), and `TMPMAIL_GUI_LOG=1` prints
 every request to the mail scheme and every navigation.
 
 ## The preview probe
@@ -38,8 +39,10 @@ It renders a hostile test mail (script, `onerror`, an attempt to reach `__TAURI_
 and `invoke`, a remote image, a `cid:` image, `target="_blank"` and `javascript:` links,
 inline styles) through the real preview, and through control frames that each drop one layer
 (CSP header only, sandbox only, scripts allowed, nothing). Anything that runs requests a URL
-on the mail scheme, which Rust records. It prints a JSON report and exits 0 when every check
-held. `TMPMAIL_GUI_PROBE_WAIT=20` keeps the window open 20 s more so you can click the test
+on the mail scheme, which Rust records. It also runs the sanitizer on the test mail directly
+(remote images dropped with images off, `http:` images dropped and `https:` kept with them
+on), since the frames can't tell the sanitizer's work from the CSP's. It prints a JSON report
+and exits 0 when every check held. `TMPMAIL_GUI_PROBE_WAIT=20` keeps the window open 20 s more so you can click the test
 links: popups that reach the app are listed under `popups_reaching_on_new_window` (and are
 not opened). The `gui` workflow runs the probe on Linux, macOS and Windows.
 
@@ -48,7 +51,9 @@ not opened). The `gui` workflow runs the probe on Linux, macOS and Windows.
 1. Mail HTML is sanitized only in Rust (ammonia, `render::sanitize_mail_html`) and never
    enters the app's DOM: lint bans `{@html}`.
 2. It is served by the `tmpmail-mail` URI scheme with its own CSP header (no scripts, images
-   only inline or from the scheme, `https:` only after "Load images").
+   only inline or from the scheme, `https:` only after "Load images"; the sanitizer drops
+   plain `http:` images). Inline `cid:` images are served only as raster image types, never
+   SVG.
 3. It is shown in `<iframe sandbox="allow-popups">`: no scripts, an opaque origin, no IPC.
 4. Links get `target="_blank"`; the app denies every new window and opens only http, https
    and mailto links in the system browser, from Rust.

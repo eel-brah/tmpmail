@@ -76,7 +76,9 @@ pub struct Frame<'a> {
 /// marked noopener, only http/https/mailto/cid/data URLs, and remote images
 /// (tracking pixels, also through `url(...)` in styles) dropped unless
 /// `allow_remote_images`. `<style>` blocks are dropped too. With a `frame`,
-/// links get `target="_blank"` and `cid:` images are rewritten.
+/// links get `target="_blank"`, `cid:` images are rewritten, and plain
+/// `http:` images are dropped even when remote images are allowed (the
+/// frame's policy would block them anyway).
 pub fn sanitize_mail_html(html: &str, allow_remote_images: bool, frame: Option<&Frame>) -> String {
     let mut builder = ammonia::Builder::default();
     builder
@@ -102,6 +104,10 @@ pub fn sanitize_mail_html(html: &str, allow_remote_images: bool, frame: Option<&
             if remote && !allow_remote_images {
                 return None;
             }
+            // The app's frame loads remote images over https only.
+            if cid_base.is_some() && is_http(value) {
+                return None;
+            }
         }
         // Inline styles can fetch remote resources through url(...).
         if attribute == "style"
@@ -113,6 +119,19 @@ pub fn sanitize_mail_html(html: &str, allow_remote_images: bool, frame: Option<&
         Some(Cow::Borrowed(value))
     });
     builder.clean(html).to_string()
+}
+
+/// Whether a URL is plain `http:` as a browser would parse it: leading
+/// spaces and control characters are ignored, and tabs and newlines
+/// anywhere.
+fn is_http(url: &str) -> bool {
+    let scheme: String = url
+        .trim_start_matches(|c: char| c <= ' ')
+        .chars()
+        .filter(|c| !matches!(c, '\t' | '\n' | '\r'))
+        .take(5)
+        .collect();
+    scheme.eq_ignore_ascii_case("http:")
 }
 
 /// Percent-encodes everything but unreserved URL characters.
@@ -219,6 +238,20 @@ mod tests {
             "{body}"
         );
         assert!(!sanitize_mail_html(html, false, None).contains("target"));
+    }
+
+    #[test]
+    fn frame_mode_loads_remote_images_over_https_only() {
+        let html = "<img src=\"https://a.example/x.png\"><img src=\"HTTP://b.example/y.png\">\
+            <img src=\" ht&#9;tp://b.example/z.png\"><img src=\"\nhttp://b.example/w.png\">";
+        let frame = Frame { cid_base: "x:" };
+        let on = sanitize_mail_html(html, true, Some(&frame));
+        assert!(on.contains("https://a.example/x.png"), "{on}");
+        assert!(!on.contains("b.example"), "{on}");
+        let off = sanitize_mail_html(html, false, Some(&frame));
+        assert!(!off.contains("example"), "{off}");
+        // The CLI's file keeps both; its policy allows http too.
+        assert!(sanitize_mail_html(html, true, None).contains("b.example"));
     }
 
     #[test]

@@ -1,21 +1,28 @@
 use std::collections::HashMap;
 use std::io::IsTerminal;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
 
 use chrono::{DateTime, Utc};
-use regex::{Regex, RegexBuilder};
 use serde::Serialize;
 
 use crate::config::Config;
 use crate::error::{Error, Result};
-use crate::extract;
-use crate::provider::{self, Capabilities, CreateOpts, Inbox, Message, Provider, Summary};
-use crate::push::Poller;
-use crate::render::{body_text, clean, clean_line, safe_filename, safe_html_document};
+use crate::provider::{self, CreateOpts, Inbox, Provider, Summary};
+use crate::render::{clean, clean_line};
 use crate::store::{State, Store};
-use crate::system;
+
+// Used by the CLI's commands (`commands.rs` takes these through `super::*`).
+#[cfg(feature = "cli")]
+use {
+    crate::extract,
+    crate::provider::{Capabilities, Message},
+    crate::push::Poller,
+    crate::render::{body_text, safe_filename, safe_html_document},
+    crate::system,
+    regex::{Regex, RegexBuilder},
+    std::sync::Arc,
+    std::sync::atomic::{AtomicBool, Ordering},
+};
 
 #[cfg(feature = "cli")]
 mod commands;
@@ -63,6 +70,7 @@ pub struct App {
     /// Where notes and warnings go instead of stderr (the TUI owns the screen).
     log: Option<Sender<String>>,
     /// Set from outside (the MCP server) to stop a running wait.
+    #[cfg(feature = "cli")]
     cancel: Option<Arc<AtomicBool>>,
 }
 
@@ -96,6 +104,7 @@ impl App {
             color,
             providers: HashMap::new(),
             log: None,
+            #[cfg(feature = "cli")]
             cancel: None,
         })
     }
@@ -112,8 +121,15 @@ impl App {
             color: false,
             providers: HashMap::new(),
             log: None,
+            #[cfg(feature = "cli")]
             cancel: None,
         }
+    }
+
+    /// Uses `p` for its provider id instead of the built-in one.
+    #[cfg(test)]
+    pub(crate) fn set_provider(&mut self, p: Box<dyn Provider>) {
+        self.providers.insert(p.id().to_string(), p);
     }
 
     /// Sends notes and warnings to `log` instead of printing them.
@@ -121,11 +137,13 @@ impl App {
         self.log = Some(log);
     }
 
+    #[cfg(feature = "cli")]
     /// Makes waits give up with `Error::Cancelled` once `flag` is set.
     pub(crate) fn cancel_on(&mut self, flag: Arc<AtomicBool>) {
         self.cancel = Some(flag);
     }
 
+    #[cfg(feature = "cli")]
     fn check_cancel(&self) -> Result<()> {
         match &self.cancel {
             Some(c) if c.load(Ordering::Relaxed) => Err(Error::Cancelled),
@@ -145,6 +163,7 @@ impl App {
         }
     }
 
+    #[cfg(feature = "cli")]
     fn bold(&self, s: &str) -> String {
         self.paint("1", s)
     }
@@ -153,22 +172,27 @@ impl App {
         self.paint("2", s)
     }
 
+    #[cfg(feature = "cli")]
     fn green(&self, s: &str) -> String {
         self.paint("32", s)
     }
 
+    #[cfg(feature = "cli")]
     fn red(&self, s: &str) -> String {
         self.paint("31", s)
     }
 
+    #[cfg(feature = "cli")]
     fn yellow(&self, s: &str) -> String {
         self.paint("33", s)
     }
 
+    #[cfg(feature = "cli")]
     fn cyan(&self, s: &str) -> String {
         self.paint("36", s)
     }
 
+    #[cfg(feature = "cli")]
     fn json_out(&self, v: &impl Serialize) {
         println!("{}", serde_json::to_string_pretty(v).expect("serializable"));
     }
@@ -207,6 +231,7 @@ impl App {
 
     // ---------- inbox plumbing ----------
 
+    #[cfg(feature = "cli")]
     /// Runs `f` against the selected inbox, then persists any credential
     /// refresh the provider made.
     fn with_inbox<T>(
@@ -245,6 +270,7 @@ impl App {
         Ok(self.providers[id].as_ref())
     }
 
+    #[cfg(feature = "cli")]
     /// Inbox indexes a command should poll: all stored ones with
     /// `--all-inboxes`, otherwise just the selected one.
     fn targets(&self, all: bool) -> Result<Vec<usize>> {
@@ -262,6 +288,7 @@ impl App {
         Ok((0..self.state.inboxes.len()).collect())
     }
 
+    #[cfg(feature = "cli")]
     fn current(&self) -> Result<&Inbox> {
         let n = self.state.resolve(self.global.inbox.as_deref())?;
         Ok(&self.state.inboxes[n])
@@ -273,6 +300,7 @@ impl App {
         Ok(list)
     }
 
+    #[cfg(feature = "cli")]
     /// Accepts an exact id, a list number from `ls`, or a unique id prefix.
     pub(crate) fn resolve_id(
         p: &dyn Provider,
@@ -309,6 +337,7 @@ impl App {
         }
     }
 
+    #[cfg(feature = "cli")]
     /// Runs `f` on the message `id` resolves to in the selected inbox.
     fn with_message<T>(
         &mut self,
@@ -401,6 +430,7 @@ impl App {
         }
     }
 
+    #[cfg(feature = "cli")]
     pub(crate) fn clipboard_cmd(&self) -> Option<String> {
         self.global
             .clipboard_cmd
@@ -408,6 +438,7 @@ impl App {
             .or_else(|| self.config.clipboard_cmd.clone())
     }
 
+    #[cfg(feature = "cli")]
     pub(crate) fn browser(&self) -> Option<String> {
         self.global
             .browser
@@ -415,6 +446,7 @@ impl App {
             .or_else(|| self.config.browser.clone())
     }
 
+    #[cfg(feature = "cli")]
     /// Creates a fresh inbox to replace the selected one, with the same
     /// provider if it works, and drops the old one unless `keep`. The caller
     /// stores the new inbox.
@@ -508,6 +540,7 @@ pub(crate) fn checked_address(p: &dyn Provider, inbox: Inbox) -> Result<Inbox> {
     }
 }
 
+#[cfg(feature = "cli")]
 pub(crate) fn compile(pattern: &str) -> Result<Regex> {
     RegexBuilder::new(pattern)
         .case_insensitive(true)
@@ -515,14 +548,17 @@ pub(crate) fn compile(pattern: &str) -> Result<Regex> {
         .map_err(|e| Error::Usage(format!("invalid regex {pattern:?}: {e}")))
 }
 
+#[cfg(feature = "cli")]
 pub(crate) fn compile_plain(pattern: &str) -> Result<Regex> {
     Regex::new(pattern).map_err(|e| Error::Usage(format!("invalid regex {pattern:?}: {e}")))
 }
 
+#[cfg(feature = "cli")]
 pub(crate) fn message_body(m: &Message) -> String {
     body_text(m.text.as_deref(), m.html.as_deref(), 200)
 }
 
+#[cfg(feature = "cli")]
 pub(crate) fn message_links(m: &Message) -> Vec<String> {
     extract::links(
         m.text.as_deref().unwrap_or_default(),
@@ -530,6 +566,7 @@ pub(crate) fn message_links(m: &Message) -> Vec<String> {
     )
 }
 
+#[cfg(feature = "cli")]
 pub(crate) fn truncate(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
         return s.to_string();
@@ -539,6 +576,7 @@ pub(crate) fn truncate(s: &str, max: usize) -> String {
     out
 }
 
+#[cfg(feature = "cli")]
 pub(crate) fn relative(t: DateTime<Utc>) -> String {
     let secs = (Utc::now() - t).num_seconds();
     let (future, secs) = (secs < 0, secs.unsigned_abs());
@@ -566,6 +604,7 @@ mod tests {
     use super::*;
     use serde_json::Value;
 
+    #[cfg(feature = "cli")]
     #[test]
     fn relative_times() {
         let now = Utc::now();
@@ -591,6 +630,7 @@ mod tests {
         assert!(!ok("a b@x.com"));
     }
 
+    #[cfg(feature = "cli")]
     #[test]
     fn truncation() {
         assert_eq!(truncate("abcdef", 4), "abc…");

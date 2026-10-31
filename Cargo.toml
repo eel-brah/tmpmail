@@ -11,12 +11,12 @@ keywords = ["email", "temporary", "disposable", "otp", "cli"]
 categories = ["command-line-utilities", "email"]
 include = ["/src", "/docs", "/README.md", "/LICENSE", "/Cargo.lock"]
 
-# Lets `cargo binstall tmpmail` fetch the release archive instead of building.
 [workspace]
 # The desktop app (in development, not released). Plain `cargo build` and
 # `cargo test` here still only build the CLI.
 members = [".", "gui/src-tauri"]
 
+# Lets `cargo binstall tmpmail` fetch the release archive instead of building.
 [package.metadata.binstall]
 pkg-url = "{ repo }/releases/download/v{ version }/{ name }-{ version }-{ target }{ archive-suffix }"
 bin-dir = "{ name }-{ version }-{ target }/{ bin }{ binary-ext }"

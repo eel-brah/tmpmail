@@ -52,7 +52,9 @@ export interface AttachmentInfo {
 
 export type MessagesEvent =
   | { address: string; live: boolean; messages: Summary[] }
-  | { address: string; error: string };
+  | { address: string; live: boolean; error: string }
+  /** The inbox has expired and is no longer checked. */
+  | { address: string; expired: true };
 
 export type OpenedEvent =
   | {

@@ -19,6 +19,7 @@
     loaded: boolean;
     live: boolean;
     error: string | null;
+    expired: boolean;
   }
 
   let init = $state<Init | null>(null);
@@ -36,6 +37,10 @@
 
   let current = $derived(inboxes.find((i) => i.address === selected) ?? null);
   let currentMail = $derived(selected ? mail[selected] : undefined);
+  // The worker's latest word wins over the inbox list's (it may be older).
+  function isExpired(inbox: InboxView): boolean {
+    return mail[inbox.address]?.expired ?? inbox.expired;
+  }
   function providerName(id: string): string {
     return init?.providers.find((p) => p.id === id)?.name ?? id;
   }
@@ -74,14 +79,20 @@
         if (!selected || !inboxes.some((i) => i.address === selected)) {
           const first = inboxes.find((i) => i.active) ?? inboxes[0];
           selected = null;
+          openId = null;
+          opened = null;
           if (first) select(first.address);
         }
       }),
       on("messages", (p) => {
-        mail[p.address] =
-          "error" in p
-            ? { ...(mail[p.address] ?? { messages: [], live: false }), loaded: true, error: p.error }
-            : { messages: p.messages, loaded: true, live: p.live, error: null };
+        const messages = mail[p.address]?.messages ?? [];
+        if ("messages" in p) {
+          mail[p.address] = { messages: p.messages, loaded: true, live: p.live, error: null, expired: false };
+        } else if ("error" in p) {
+          mail[p.address] = { messages, loaded: true, live: p.live, error: p.error, expired: false };
+        } else {
+          mail[p.address] = { messages, loaded: true, live: false, error: null, expired: true };
+        }
       }),
       on("opened", (p) => {
         if (p.address === selected && p.id === openId) opened = p;
@@ -157,14 +168,14 @@
               class={[
                 "flex w-full flex-col items-start px-4 py-2 text-left",
                 inbox.address === selected ? "bg-accent-soft" : "hover:bg-raised",
-                inbox.expired && "opacity-55",
+                isExpired(inbox) && "opacity-55",
               ]}
               aria-current={inbox.address === selected}
               onclick={() => select(inbox.address)}
             >
               <span class="w-full truncate text-xs font-medium">{inbox.label ?? inbox.address}</span>
               <span class="text-2xs text-muted">
-                {providerName(inbox.provider)}{inbox.expired ? ", expired" : ""}{count
+                {providerName(inbox.provider)}{isExpired(inbox) ? ", expired" : ""}{count
                   ? `, ${count} mail${count === 1 ? "" : "s"}`
                   : ""}
               </span>
@@ -185,7 +196,8 @@
           </p>
           <p class="mt-1 text-2xs text-muted">
             {providerName(current.provider)}
-            {#if currentMail?.live}<span class="text-accent">, live</span>{/if}
+            {#if isExpired(current)}<span class="text-alert">, expired</span>
+            {:else if currentMail?.live}<span class="text-accent">, live</span>{/if}
             {#if !current.private}<span class="text-alert">, public: anyone can read it</span>{/if}
           </p>
         </header>
@@ -216,7 +228,13 @@
             </li>
           {:else}
             <li class="px-4 py-6 text-xs text-muted">
-              {currentMail?.loaded ? "No mail yet. New mail shows up here by itself." : "Checking for mail…"}
+              {#if isExpired(current)}
+                This inbox has expired. No more mail will arrive.
+              {:else if currentMail?.loaded}
+                No mail yet. New mail shows up here by itself.
+              {:else}
+                Checking for mail…
+              {/if}
             </li>
           {/each}
         </ul>
