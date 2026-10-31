@@ -38,6 +38,9 @@ Credentials are never printed.
 `ls --all-inboxes` returns `{"inboxes": [{"address", "created_at", "messages": [...], "error"?}, ...]}`.
 `error` (`{"kind", "message"}`) is present only for an inbox that couldn't be read.
 
+`seen` is true once the message was opened with `read`, in the TUI or in the desktop app, or
+when the provider marks it read itself.
+
 `watch --json` prints one Summary per line as messages arrive, plus an `"inbox"` field
 with the receiving address. With `--rotate`, each switch to a new address prints a line
 `{"rotated": {"from": "old@...", "to": "new@..."}}`; tell the two apart by the `rotated` key.

@@ -157,9 +157,17 @@ impl Watcher {
         let changed = addresses(&state) != addresses(&self.app.state)
             || state.active != self.app.state.active;
         for old in &self.app.state.inboxes {
-            if state.position(&old.address).is_none() {
-                self.poller.forget(&old.address);
-                self.expired.remove(&old.address);
+            match state.position(&old.address) {
+                None => {
+                    self.poller.forget(&old.address);
+                    self.expired.remove(&old.address);
+                }
+                // Another tmpmail marked mail read: list it again so the
+                // front end shows that now, not at the next check.
+                Some(k) if state.inboxes[k].read != old.read => {
+                    self.poller.poll_now(&old.address);
+                }
+                Some(_) => {}
             }
         }
         self.app.state = state;

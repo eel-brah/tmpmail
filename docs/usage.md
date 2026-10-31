@@ -82,7 +82,10 @@ tmpmail new -p guerrilla           # force Guerrilla Mail
 
 Lists messages, newest first. Alias: `inbox`. Running `tmpmail` with no arguments does the same.
 Each line shows the list number, a `*` if the message is unread, its age, the sender and
-the subject. `[att]` means the message has attachments.
+the subject. `[att]` means the message has attachments. A message counts as read once
+`read`, the MCP server's `read_message`, the TUI (when you move to it or into its preview) or
+the desktop app has opened it (tmpmail remembers it in its state file, with any provider), or
+when the provider marks it read itself.
 
 | Option | Short | Explanation |
 |---|---|---|

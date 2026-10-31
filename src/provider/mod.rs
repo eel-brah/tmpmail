@@ -56,6 +56,11 @@ pub struct Inbox {
     pub expires_at: Option<DateTime<Utc>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
+    /// Ids of the messages opened here (`read`, the TUI, the desktop app),
+    /// oldest first, so every front end shows them read, with any
+    /// provider. Only [`crate::app::App::mark_read`] changes it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub read: Vec<String>,
 }
 
 impl Inbox {
@@ -67,6 +72,7 @@ impl Inbox {
             created_at: Utc::now(),
             expires_at: None,
             label: None,
+            read: Vec::new(),
         }
     }
 

@@ -358,7 +358,7 @@ Thanks to **mail.tm** for its free API; per its terms this client links back to 
 | Command | What it does |
 |---|---|
 | `new [ADDR] [-u USER] [-d DOMAIN] [-p PROVIDER] [-l LABEL] [-c]` | Create an inbox (alias `generate`) |
-| `ls [-a]` | List messages, newest first, `*` = unread; `-a` = all your inboxes |
+| `ls [-a]` | List messages, newest first, `*` = unread (not yet opened with `read`, the TUI or the app); `-a` = all your inboxes |
 | `read [ID\|N] [--recent] [--html [--images]] [--raw] [--no-pager]` | Show a message (long ones in a pager) |
 | `wait [-a] [--from RE] [--subject RE] [--body RE] [--timeout S] [--otp\|--link] [--delete]` | Block until a matching message arrives |
 | `otp [ID] [--regex RE] [--wait ...]` | Extract a verification code |

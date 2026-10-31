@@ -65,6 +65,11 @@ enum Req {
         address: String,
         id: String,
     },
+    /// The user viewed this message: saved as read for every front end.
+    MarkRead {
+        address: String,
+        id: String,
+    },
     /// A new inbox at this provider only, or with the fallback order.
     Create(Option<String>),
     Use(String),
@@ -157,6 +162,8 @@ impl watcher::Front for Front {
                 let Some(n) = w.app.state.position(&address) else {
                     return false;
                 };
+                // Shown, not yet read: the preview opens on its own when a
+                // list loads. `MarkRead` follows once the user looks at it.
                 let result = w
                     .app
                     .with_inbox_at(n, |p, inbox| p.get(inbox, &id))
@@ -181,6 +188,14 @@ impl watcher::Front for Front {
                     fail("could not switch inbox", e);
                 }
                 true
+            }
+            Req::MarkRead { address, id } => {
+                if let Some(n) = w.app.state.position(&address)
+                    && let Err(e) = w.app.mark_read(n, &id)
+                {
+                    fail("couldn't mark the message read", e);
+                }
+                false
             }
             Req::DeleteMessage { address, id } => {
                 match w.delete_message(&address, &id) {
@@ -300,6 +315,9 @@ impl Ui {
                 if let Event::Key(key) = event::read().map_err(anyhow::Error::from)? {
                     if key.kind == KeyEventKind::Press {
                         self.key(key, app);
+                        if self.focus == Focus::Preview {
+                            self.mark_shown_read();
+                        }
                     }
                 }
             }
@@ -443,11 +461,6 @@ impl Ui {
                     if self.shown.as_ref() == Some(&key) {
                         self.preview = Preview::Ready(msg.clone());
                     }
-                    if let Some(m) = self.mail.get_mut(&key.0) {
-                        if let Some(s) = m.messages.iter_mut().find(|s| s.id == key.1) {
-                            s.seen = true;
-                        }
-                    }
                     self.cache.insert(key, msg);
                 }
                 Err(e) => {
@@ -480,6 +493,25 @@ impl Ui {
     }
 
     /// Shows the selected message, fetching it unless it is cached.
+    /// Marks the message in the preview read, here and (through the
+    /// worker) in the state file. Called when the user moves to a message
+    /// or into the preview; a preview that loads on its own isn't "read".
+    fn mark_shown_read(&mut self) {
+        let Some((address, id)) = self.shown.clone() else {
+            return;
+        };
+        let Some(s) = self
+            .mail
+            .get_mut(&address)
+            .and_then(|m| m.messages.iter_mut().find(|s| s.id == id))
+            .filter(|s| !s.seen)
+        else {
+            return;
+        };
+        s.seen = true;
+        self.send(Req::MarkRead { address, id });
+    }
+
     fn load_preview(&mut self) {
         let key = self.address().zip(self.summary().map(|s| s.id.clone()));
         if key == self.shown && !matches!(self.preview, Preview::Failed(_)) {
@@ -704,6 +736,7 @@ impl Ui {
                 let len = self.messages().len();
                 move_in(&mut self.msg_state, len);
                 self.load_preview();
+                self.mark_shown_read();
             }
             Focus::Preview => {
                 self.scroll = if by > 0 {
@@ -734,6 +767,7 @@ impl Ui {
                 };
                 self.msg_state.select(n);
                 self.load_preview();
+                self.mark_shown_read();
             }
             Focus::Preview => self.scroll = if end { u16::MAX / 2 } else { 0 },
         }
@@ -1238,6 +1272,37 @@ mod tests {
             subject: subject.into(),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn a_message_is_read_once_the_user_moves_to_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = App::for_test(dir.path().to_path_buf());
+        let (tx, rx) = channel();
+        let mut ui = Ui::new(tx);
+        let inbox = Inbox::new("mailtm", "a@x.com".into(), serde_json::Value::Null);
+        ui.event(Ev::Inboxes {
+            inboxes: vec![inbox],
+            active: None,
+        });
+        ui.focus = Focus::Messages;
+        ui.event(Ev::Listed {
+            address: "a@x.com".into(),
+            result: Ok(vec![summary("2", "new"), summary("1", "old")]),
+            live: false,
+        });
+        // The preview opened on its own: shown, not read.
+        assert!(matches!(rx.try_recv(), Ok(Req::Open { id, .. }) if id == "2"));
+        assert!(rx.try_recv().is_err());
+        assert!(!ui.summary().unwrap().seen);
+
+        press(&mut ui, &mut app, KeyCode::Char('j'));
+        assert!(matches!(rx.try_recv(), Ok(Req::Open { id, .. }) if id == "1"));
+        assert!(matches!(rx.try_recv(), Ok(Req::MarkRead { id, .. }) if id == "1"));
+        assert!(ui.summary().unwrap().seen);
+        // Only once.
+        press(&mut ui, &mut app, KeyCode::Char('j'));
+        assert!(rx.try_recv().is_err());
     }
 
     #[test]

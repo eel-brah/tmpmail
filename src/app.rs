@@ -7,7 +7,7 @@ use serde::Serialize;
 
 use crate::config::Config;
 use crate::error::{Error, Result};
-use crate::provider::{self, CreateOpts, Inbox, Provider, Summary};
+use crate::provider::{self, CreateOpts, Inbox, Message, Provider, Summary};
 use crate::render::{clean, clean_line};
 use crate::store::{State, Store};
 
@@ -15,7 +15,7 @@ use crate::store::{State, Store};
 #[cfg(feature = "cli")]
 use {
     crate::extract,
-    crate::provider::{Capabilities, Message},
+    crate::provider::Capabilities,
     crate::push::Poller,
     crate::render::{body_text, safe_filename, safe_html_document},
     crate::system,
@@ -26,6 +26,9 @@ use {
 
 #[cfg(feature = "cli")]
 mod commands;
+
+/// How many read message ids each inbox remembers (`Inbox::read`).
+const MAX_READ: usize = 500;
 
 /// Options every command shares: the CLI's global flags.
 #[derive(Debug, Clone, Default)]
@@ -293,9 +296,13 @@ impl App {
             self.state.inboxes[n] = inbox.clone();
             // Merge into the file as it is now: another tmpmail may have
             // changed other inboxes. One dropped meanwhile stays dropped.
+            // The read list is the file's: another tmpmail may have just
+            // marked a message read in this inbox.
             self.store.update(|s| {
                 if let Some(k) = s.position(&inbox.address) {
+                    let read = std::mem::take(&mut s.inboxes[k].read);
                     s.inboxes[k] = inbox;
+                    s.inboxes[k].read = read;
                 }
             })?;
         }
@@ -333,10 +340,69 @@ impl App {
         Ok(&self.state.inboxes[n])
     }
 
+    /// The inbox's messages, newest first; those opened in tmpmail are
+    /// marked seen even where the provider doesn't track it.
     pub fn sorted_list(p: &dyn Provider, inbox: &mut Inbox) -> Result<Vec<Summary>> {
         let mut list = p.list(inbox)?;
         list.sort_by_key(|s| std::cmp::Reverse(s.date));
+        if !inbox.read.is_empty() {
+            let read: std::collections::HashSet<&str> =
+                inbox.read.iter().map(String::as_str).collect();
+            for s in &mut list {
+                s.seen |= read.contains(s.id.as_str());
+            }
+        }
         Ok(list)
+    }
+
+    #[cfg(feature = "cli")]
+    /// Message `id` of inbox `n` (a list number, id or prefix; the newest
+    /// when absent) and its id as listed.
+    pub(crate) fn message_at(&mut self, n: usize, id: Option<&str>) -> Result<(Message, String)> {
+        self.with_inbox_at(n, |p, inbox| {
+            let id = Self::resolve_id(p, inbox, id)?;
+            Ok((p.get(inbox, &id)?, id))
+        })
+    }
+
+    /// [`App::mark_read`], noting a failure instead of returning it: the
+    /// message was shown either way.
+    pub(crate) fn mark_read_noting(&mut self, n: usize, id: &str) {
+        if let Err(e) = self.mark_read(n, id) {
+            self.note(&format!("couldn't mark the message read: {e}"));
+        }
+    }
+
+    /// Fetches message `id` of inbox `n` and remembers that it was read. A
+    /// failure to remember is only noted: the message is there.
+    pub fn open_message(&mut self, n: usize, id: &str) -> Result<Message> {
+        let msg = self.with_inbox_at(n, |p, inbox| p.get(inbox, id))?;
+        self.mark_read_noting(n, id);
+        Ok(msg)
+    }
+
+    /// Remembers in the state file that message `id` of inbox `n` was read,
+    /// so the CLI, the TUI and the desktop app all show it read. Keeps the
+    /// newest [`MAX_READ`] ids.
+    pub fn mark_read(&mut self, n: usize, id: &str) -> Result<()> {
+        if self.state.inboxes[n].read.iter().any(|r| r == id) {
+            return Ok(());
+        }
+        let address = self.state.inboxes[n].address.clone();
+        let (_, read) = self.store.update(|s| {
+            let k = s.position(&address)?;
+            let read = &mut s.inboxes[k].read;
+            if !read.iter().any(|r| r == id) {
+                read.push(id.to_string());
+                let extra = read.len().saturating_sub(MAX_READ);
+                read.drain(..extra);
+            }
+            Some(read.clone())
+        })?;
+        if let Some(read) = read {
+            self.state.inboxes[n].read = read;
+        }
+        Ok(())
     }
 
     #[cfg(feature = "cli")]
@@ -642,6 +708,100 @@ pub(crate) fn relative(t: DateTime<Utc>) -> String {
 mod tests {
     use super::*;
     use serde_json::Value;
+
+    /// Lists messages "1" and "2", neither seen at the provider; a listing
+    /// renews the credential, as a token refresh would.
+    struct Unseen;
+
+    impl Provider for Unseen {
+        fn id(&self) -> &'static str {
+            "fake"
+        }
+        fn name(&self) -> &'static str {
+            "Fake"
+        }
+        fn website(&self) -> &'static str {
+            ""
+        }
+        fn caps(&self) -> provider::Capabilities {
+            unimplemented!()
+        }
+        fn domains(&self) -> Result<Vec<String>> {
+            unimplemented!()
+        }
+        fn create(&self, _: &CreateOpts) -> Result<Inbox> {
+            unimplemented!()
+        }
+        fn list(&self, inbox: &mut Inbox) -> Result<Vec<Summary>> {
+            inbox.credential =
+                Value::String(format!("{}+", inbox.credential.as_str().unwrap_or("")));
+            Ok(["1", "2"]
+                .map(|id| Summary {
+                    id: id.into(),
+                    ..Default::default()
+                })
+                .to_vec())
+        }
+        fn get(&self, _: &mut Inbox, id: &str) -> Result<Message> {
+            Ok(Message {
+                id: id.into(),
+                ..Default::default()
+            })
+        }
+    }
+
+    fn app_with_inbox(dir: &std::path::Path) -> App {
+        let mut app = App::for_test(dir.to_path_buf());
+        app.set_provider(Box::new(Unseen));
+        let inbox = Inbox::new("fake", "a@x.com".into(), Value::String("t".into()));
+        app.state = app.store.update(|s| s.add(inbox)).unwrap().0;
+        app
+    }
+
+    fn seen(app: &mut App) -> Vec<bool> {
+        app.with_inbox_at(0, App::sorted_list)
+            .unwrap()
+            .iter()
+            .map(|s| s.seen)
+            .collect()
+    }
+
+    #[test]
+    fn an_opened_message_is_read_everywhere() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut gui = app_with_inbox(dir.path());
+        // Another tmpmail (the CLI) with the state as it was.
+        let mut cli = app_with_inbox(dir.path());
+        cli.state = cli.store.load().unwrap();
+
+        assert_eq!(seen(&mut gui), [false, false]);
+        gui.open_message(0, "1").unwrap();
+        assert_eq!(seen(&mut gui), [true, false]);
+        assert_eq!(cli.store.load().unwrap().inboxes[0].read, ["1"]);
+
+        // The CLI's stale copy saves a new credential: the mark stays.
+        assert_eq!(seen(&mut cli), [false, false], "not reloaded yet");
+        let file = cli.store.load().unwrap();
+        assert_eq!(file.inboxes[0].read, ["1"]);
+        assert!(file.inboxes[0].credential.as_str().unwrap().ends_with('+'));
+        cli.state = file;
+        assert_eq!(seen(&mut cli), [true, false]);
+    }
+
+    #[test]
+    fn the_read_list_keeps_the_newest_ids() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_inbox(dir.path());
+        for n in 0..MAX_READ + 2 {
+            app.mark_read(0, &n.to_string()).unwrap();
+        }
+        app.mark_read(0, "5").unwrap();
+        let read = &app.store.load().unwrap().inboxes[0].read;
+        assert_eq!(read.len(), MAX_READ);
+        assert_eq!(read[0], "2");
+        assert_eq!(read.last().map(String::as_str), Some("501"));
+        assert_eq!(*read, app.state.inboxes[0].read);
+    }
 
     #[test]
     fn colors_need_a_terminal_that_shows_them() {

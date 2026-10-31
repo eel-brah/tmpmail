@@ -224,8 +224,13 @@ impl App {
     }
 
     fn read(&mut self, a: ReadArgs) -> Result<()> {
+        let n = self.state.resolve(self.global.inbox.as_deref())?;
         if a.raw {
-            let raw = self.with_message(a.msg.id.as_deref(), |p, inbox, id| p.raw(inbox, id))?;
+            let (raw, id) = self.with_inbox_at(n, |p, inbox| {
+                let id = Self::resolve_id(p, inbox, a.msg.id.as_deref())?;
+                Ok((p.raw(inbox, &id)?, id))
+            })?;
+            self.mark_read_noting(n, &id);
             let mut out = std::io::stdout();
             // Exact bytes when piped; a sender's escape sequences must not
             // reach a terminal, though.
@@ -237,7 +242,10 @@ impl App {
             .map_err(anyhow::Error::from)?;
             return Ok(());
         }
-        let msg = self.fetch(&a.msg)?;
+        // Marked by its id as listed (a message's own may be spelled
+        // differently).
+        let (msg, id) = self.message_at(n, a.msg.id.as_deref())?;
+        self.mark_read_noting(n, &id);
         if a.html {
             return self.open_html(&msg, a.images);
         }

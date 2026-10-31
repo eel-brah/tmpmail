@@ -221,15 +221,16 @@ impl Server<'_> {
     /// The message `id` names (newest when absent) and its inbox address.
     fn fetch(&mut self, inbox: Option<&str>, id: Option<&str>) -> Result<(String, Message)> {
         let n = self.app.state.resolve(inbox)?;
-        let msg = self.app.with_inbox_at(n, |p, inbox| {
-            let id = App::resolve_id(p, inbox, id)?;
-            p.get(inbox, &id)
-        })?;
+        let (msg, _) = self.app.message_at(n, id)?;
         Ok((self.app.state.inboxes[n].address.clone(), msg))
     }
 
+    /// Reading a message marks it read, as the CLI's `read` does.
     fn read_message(&mut self, a: MessageArgs) -> Result<Value> {
-        let (inbox, msg) = self.fetch(a.inbox.as_deref(), a.id.as_deref())?;
+        let n = self.app.state.resolve(a.inbox.as_deref())?;
+        let (msg, id) = self.app.message_at(n, a.id.as_deref())?;
+        self.app.mark_read_noting(n, &id);
+        let inbox = self.app.state.inboxes[n].address.clone();
         Ok(message_json(&inbox, &msg, a.include_html))
     }
 

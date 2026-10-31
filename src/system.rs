@@ -313,9 +313,7 @@ pub fn page(text: &str, pager: Option<&str>) -> anyhow::Result<()> {
     if std::env::var_os("LESS").is_none() {
         command.env("LESS", "FRX");
     }
-    let mut child = command
-        .spawn()
-        .with_context(|| format!("cannot run {prog}"))?;
+    let mut child = spawn(&mut command).with_context(|| format!("cannot run {prog}"))?;
     let written = child
         .stdin
         .take()

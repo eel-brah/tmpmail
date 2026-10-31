@@ -157,7 +157,17 @@ impl State {
         Ok(self.inboxes.len() - 1)
     }
 
-    pub fn add(&mut self, inbox: Inbox) {
+    /// Stores `inbox` as the active one, replacing a stored inbox with the
+    /// same address (keeping the messages read there).
+    pub fn add(&mut self, mut inbox: Inbox) {
+        if let Some(old) = self
+            .inboxes
+            .iter_mut()
+            .find(|i| i.address.eq_ignore_ascii_case(&inbox.address))
+            && inbox.read.is_empty()
+        {
+            inbox.read = std::mem::take(&mut old.read);
+        }
         self.inboxes
             .retain(|i| !i.address.eq_ignore_ascii_case(&inbox.address));
         self.active = Some(inbox.address.clone());
@@ -294,5 +304,15 @@ mod tests {
         s.add(inbox("a@x.com"));
         s.add(inbox("A@x.com"));
         assert_eq!(s.inboxes.len(), 1);
+    }
+
+    #[test]
+    fn re_adding_an_address_keeps_its_read_marks() {
+        let mut s = State::default();
+        let mut a = inbox("a@x.com");
+        a.read = vec!["1".into()];
+        s.add(a);
+        s.add(inbox("A@x.com"));
+        assert_eq!(s.inboxes[0].read, ["1"]);
     }
 }

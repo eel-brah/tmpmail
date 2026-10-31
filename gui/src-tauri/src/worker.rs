@@ -371,7 +371,8 @@ impl Front {
         let Some(n) = app.state.position(&address) else {
             return;
         };
-        let payload = match app.with_inbox_at(n, |p, inbox| p.get(inbox, &id)) {
+        // Marks it read too, in the state file the CLI and TUI read.
+        let payload = match app.open_message(n, &id) {
             Ok(msg) => {
                 let mail = Mails::entry(&address, msg);
                 let msg = &mail.msg;

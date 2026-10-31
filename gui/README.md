@@ -18,8 +18,9 @@ preview on `gui-v*` tags; install steps are in the [main README](../README.md#de
 - **Live mail:** the same worker loop as the TUI (`tmpmail::watcher`: polling, push
   streams, state reloads so CLI changes show up within ~5 s). New mail is marked New, and a
   notice names the sender and subject with an Open button.
-- **Messages:** unread dot, sender, subject, time and attachment icon; filter by sender or
-  subject (`/`); delete (asks first) where the provider supports it.
+- **Messages:** unread dot (opening a message marks it read, saved in `state.json` so the
+  CLI's `ls` and the TUI agree; the sidebar badge counts the rest), sender, subject, time and
+  attachment icon; filter by sender or subject (`/`); delete (asks first) where the provider supports it.
 - **The open message:**
   - The verification code, when `extract` finds one, in a banner at the top with a Copy
     button.
