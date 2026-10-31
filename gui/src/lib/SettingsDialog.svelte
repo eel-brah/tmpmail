@@ -111,8 +111,8 @@
   aria-labelledby="settings-title"
   onclose={() => (app.settingsOpen = false)}
 >
-  <form class="flex max-h-[calc(100vh-2rem)] flex-col" onsubmit={submit}>
-    <header class="flex items-start justify-between gap-4 px-6 pt-5">
+  <form class="flex min-h-0 flex-col" onsubmit={submit}>
+    <header class="flex shrink-0 items-start justify-between gap-4 px-6 pt-5">
       <div>
         <h2 id="settings-title" class="text-lg font-semibold tracking-title">Settings</h2>
         <p class="mt-0.5 text-xs text-muted">Providers and checking are shared with the <code class="font-mono">tmpmail</code> command.</p>
@@ -284,7 +284,7 @@
       {/if}
     </div>
 
-    <footer class="flex items-center justify-end gap-2 border-t border-rule px-6 py-3.5">
+    <footer class="flex shrink-0 items-center justify-end gap-2 border-t border-rule px-6 py-3.5">
       {#if saveError}
         <p class="selectable mr-auto min-w-0 text-2xs break-words text-danger" role="alert">{saveError}</p>
       {/if}

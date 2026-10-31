@@ -70,7 +70,9 @@ preview on `gui-v*` tags; install steps are in the [main README](../README.md#de
   since the last load.
 - **Look:** System / Light / Dark switch (remembered), resizable panes (remembered),
   keyboard focus rings, motion only on arrival of mail and dialogs, none with
-  `prefers-reduced-motion`.
+  `prefers-reduced-motion`. The window opens at 1240×780, or smaller and centered when the
+  primary screen's work area can't hold that; its minimum size follows the screen it is on.
+  Every dialog fits the window: its body scrolls while the title and buttons stay in view.
 
 What each provider allows decides what's shown: Delete (message) is hidden for DropMail and
 tempmail.lol; Attachments for tempmail.lol and Maildrop; the domain picker for tempmail.lol

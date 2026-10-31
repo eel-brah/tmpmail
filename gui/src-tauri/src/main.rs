@@ -38,6 +38,45 @@ type Handler = Box<dyn Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + Sync>
 
 /// How many opened messages the scheme can still serve.
 const KEEP_MAILS: usize = 32;
+/// The window's size on a screen with room for it, and its minimum, in
+/// logical pixels.
+const WINDOW: (f64, f64) = (1240.0, 780.0);
+const WINDOW_MIN: (f64, f64) = (900.0, 560.0);
+/// Room left around the window in the work area: borders, and the title
+/// bar the system adds above the content.
+const WINDOW_MARGIN: (f64, f64) = (16.0, 48.0);
+
+/// The window's size and minimum size for a work area of `work` logical
+/// pixels: the defaults, made smaller on a screen too small for them, so
+/// the whole window (and a dialog's buttons) stays on screen.
+fn fit_window(work: (f64, f64)) -> ((f64, f64), (f64, f64)) {
+    let room = (
+        (work.0 - WINDOW_MARGIN.0).max(320.0),
+        (work.1 - WINDOW_MARGIN.1).max(240.0),
+    );
+    let min = (WINDOW_MIN.0.min(room.0), WINDOW_MIN.1.min(room.1));
+    let size = (WINDOW.0.min(room.0), WINDOW.1.min(room.1));
+    (size, min)
+}
+
+/// The work area of `monitor` in logical pixels.
+fn work_area(monitor: &tauri::window::Monitor) -> (f64, f64) {
+    let scale = monitor.scale_factor();
+    let area = monitor.work_area().size;
+    (
+        f64::from(area.width) / scale,
+        f64::from(area.height) / scale,
+    )
+}
+
+/// Lets the window shrink to fit the monitor it is now on (it moved, or the
+/// scale changed). Its size is left alone.
+fn fit_min_size(window: &tauri::Window) {
+    if let Ok(Some(monitor)) = window.current_monitor() {
+        let (_, min) = fit_window(work_area(&monitor));
+        let _ = window.set_min_size(Some(tauri::LogicalSize::new(min.0, min.1)));
+    }
+}
 
 /// State shared by the commands, the scheme handler and the worker.
 pub struct Shared {
@@ -209,6 +248,9 @@ fn main() {
             let shared = window.state::<Arc<Shared>>();
             match event {
                 WindowEvent::Focused(focused) => shared.focused.store(*focused, Ordering::Relaxed),
+                WindowEvent::Moved(_) | WindowEvent::ScaleFactorChanged { .. } => {
+                    fit_min_size(window)
+                }
                 // With the tray on, closing hides the window; mail is still
                 // checked, and the tray brings it back.
                 WindowEvent::CloseRequested { api, .. } if tray::keeps_running(&shared) => {
@@ -309,34 +351,51 @@ fn main() {
                 }
             }
 
+            // On a screen too small for the default size, Tauri shrinks the
+            // window to the work area (the primary monitor's: it opens
+            // there) and centers it; the minimum size shrinks with it.
+            let fit = app
+                .primary_monitor()
+                .ok()
+                .flatten()
+                .map(|m| fit_window(work_area(&m)));
+            let (size, min) = fit.unwrap_or((WINDOW, WINDOW_MIN));
             let handle = app.handle().clone();
             let for_popups = shared.clone();
-            let window =
+            let mut builder =
                 WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
                     .title("tmpmail")
                     .visible(!hidden)
-                    .inner_size(1240.0, 780.0)
-                    .min_inner_size(900.0, 560.0)
-                    .on_navigation(|url| {
-                        let ok = app_page(url);
-                        if std::env::var_os("TMPMAIL_GUI_LOG").is_some() {
-                            eprintln!(
-                                "navigation {url}: {}",
-                                if ok { "allowed" } else { "blocked" }
-                            );
-                        }
-                        ok
-                    })
-                    .on_page_load(|_, payload| {
-                        if std::env::var_os("TMPMAIL_GUI_LOG").is_some() {
-                            eprintln!("page {:?}: {}", payload.event(), payload.url());
-                        }
-                    })
-                    .on_new_window(move |url, _features| {
-                        popup(&handle, &for_popups, &url);
-                        NewWindowResponse::Deny
-                    })
-                    .build()?;
+                    .inner_size(WINDOW.0, WINDOW.1)
+                    .min_inner_size(min.0, min.1)
+                    .prevent_overflow_with_margin(tauri::LogicalSize::new(
+                        WINDOW_MARGIN.0,
+                        WINDOW_MARGIN.1,
+                    ));
+            if size != WINDOW {
+                builder = builder.center();
+            }
+            let window = builder
+                .on_navigation(|url| {
+                    let ok = app_page(url);
+                    if std::env::var_os("TMPMAIL_GUI_LOG").is_some() {
+                        eprintln!(
+                            "navigation {url}: {}",
+                            if ok { "allowed" } else { "blocked" }
+                        );
+                    }
+                    ok
+                })
+                .on_page_load(|_, payload| {
+                    if std::env::var_os("TMPMAIL_GUI_LOG").is_some() {
+                        eprintln!("page {:?}: {}", payload.event(), payload.url());
+                    }
+                })
+                .on_new_window(move |url, _features| {
+                    popup(&handle, &for_popups, &url);
+                    NewWindowResponse::Deny
+                })
+                .build()?;
             // Calls must come over the IPC protocol, where the engine sets
             // their Origin (caller.rs). The app doesn't start without that.
             caller::close_post_message(&window)
@@ -373,6 +432,23 @@ mod tests {
         assert!(!ok("http://localhost:8080/"));
         assert!(!ok("https://example.com/"));
         assert!(!ok("tmpmail-mail://evil/mail/1"));
+    }
+
+    #[test]
+    fn the_window_fits_small_screens() {
+        // Room for the defaults: unchanged.
+        assert_eq!(fit_window((1920.0, 1040.0)), (WINDOW, WINDOW_MIN));
+        // The test VM: 1280×720 with a 48 px taskbar.
+        assert_eq!(fit_window((1280.0, 672.0)), ((1240.0, 624.0), WINDOW_MIN));
+        // 1024×600: shorter than the minimum, which shrinks too.
+        assert_eq!(
+            fit_window((1024.0, 560.0)),
+            ((1008.0, 512.0), (900.0, 512.0))
+        );
+        // A 1366×768 laptop at 150 %: 910×480 logical.
+        let (size, min) = fit_window((910.0, 480.0));
+        assert_eq!(size, (894.0, 432.0));
+        assert_eq!(min, size);
     }
 
     #[test]

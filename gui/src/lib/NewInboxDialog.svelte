@@ -61,8 +61,8 @@
   aria-labelledby="new-inbox-title"
   onclose={() => (app.newInboxOpen = false)}
 >
-  <form class="flex max-h-[calc(100vh-2rem)] flex-col" onsubmit={submit}>
-    <header class="flex items-start justify-between gap-4 px-6 pt-5">
+  <form class="flex min-h-0 flex-col" onsubmit={submit}>
+    <header class="flex shrink-0 items-start justify-between gap-4 px-6 pt-5">
       <div>
         <h2 id="new-inbox-title" class="text-lg font-semibold tracking-title">New inbox</h2>
         <p class="mt-0.5 text-xs text-muted">Pick a provider, or let tmpmail use the first one that answers.</p>
@@ -149,7 +149,7 @@
       </label>
     </div>
 
-    <footer class="flex items-center justify-end gap-2 border-t border-rule px-6 py-3.5">
+    <footer class="flex shrink-0 items-center justify-end gap-2 border-t border-rule px-6 py-3.5">
       <button type="button" class="btn" onclick={() => (app.newInboxOpen = false)}>Cancel</button>
       <button type="submit" class="btn btn-primary min-w-28" disabled={app.creating}>
         {app.creating ? "Creating…" : "Create inbox"}
