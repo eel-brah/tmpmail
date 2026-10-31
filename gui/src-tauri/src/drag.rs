@@ -68,6 +68,7 @@ impl Files {
         }
         let base = dir.as_ref().expect("just made").path();
         let sub = base.join(format!("{key}-{index}"));
+        #[cfg_attr(not(unix), allow(unused_mut))]
         let mut builder = std::fs::DirBuilder::new();
         #[cfg(unix)]
         std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
