@@ -1,15 +1,25 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "main",
-  "description": "The main window: the app's own commands and event listening, nothing else. Links are opened from Rust, so no opener permission is granted.",
-  "windows": ["main"],
+  "description": "The main window: the app's own commands and event listening, nothing else. The clipboard, dialog and opener plugins are used from Rust only, so the page gets none of their permissions.",
+  "windows": [
+    "main"
+  ],
   "permissions": [
     "core:event:allow-listen",
     "core:event:allow-unlisten",
     "allow-init",
+    "allow-domains",
     "allow-create-inbox",
     "allow-select-inbox",
+    "allow-use-inbox",
+    "allow-delete-inbox",
     "allow-open-message",
+    "allow-delete-message",
+    "allow-copy-address",
+    "allow-copy-from-message",
+    "allow-open-link",
+    "allow-save-attachment",
     "allow-probe-finish"
   ]
 }

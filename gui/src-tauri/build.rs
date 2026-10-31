@@ -3,9 +3,17 @@ fn main() {
     // each one: by default every registered command is open to every window.
     let manifest = tauri_build::AppManifest::new().commands(&[
         "init",
+        "domains",
         "create_inbox",
         "select_inbox",
+        "use_inbox",
+        "delete_inbox",
         "open_message",
+        "delete_message",
+        "copy_address",
+        "copy_from_message",
+        "open_link",
+        "save_attachment",
         "probe_finish",
     ]);
     tauri_build::try_build(tauri_build::Attributes::new().app_manifest(manifest))

@@ -3,14 +3,18 @@
 //! Content-Security-Policy, so the mail frame's rules don't depend on the
 //! app's, and "load images" is a different response, not a looser shell.
 //!
-//! Paths: `/mail/<key>[?images=1]` is a message body, `/mail/<key>/cid/<id>`
-//! one of its inline images. Nothing here does network work: inline images
-//! that aren't cached are fetched by the worker.
+//! Paths: `/mail/<key>` is a message body, `/mail/<key>/source` its source
+//! as escaped text, `/mail/<key>/cid/<id>` one of its inline images. The
+//! query carries the view: `theme=dark|light`, `images=1` (remote https
+//! images), `original=1` (the sender's colors in dark mode). The theme
+//! reaches the frame only this way, never through a script. Nothing here
+//! does network work: inline images and sources that aren't cached are
+//! fetched by the worker.
 
 use tauri::http::{Request, Response, StatusCode, header};
 use tauri::{AppHandle, UriSchemeResponder};
 use tmpmail::provider::{Attachment, Message};
-use tmpmail::render::{Frame, escape_html, sanitize_mail_html};
+use tmpmail::render::{Frame, escape_html, has_own_colors, sanitize_mail_html};
 
 use crate::Shared;
 use crate::worker::Req;
@@ -43,12 +47,84 @@ pub fn mail_csp(images: bool) -> String {
     )
 }
 
-/// Mail is shown on a white page whatever the app's theme: senders design
-/// for one, and recoloring their HTML is guesswork.
-const FRAME_CSS: &str = "html{background:#fff;color:#1a1a1a;color-scheme:light}\
-body{margin:20px 24px;font:14px/1.55 system-ui,-apple-system,'Segoe UI',sans-serif;\
-overflow-wrap:anywhere}img{max-width:100%;height:auto}\
-pre{white-space:pre-wrap;font:13px/1.5 ui-monospace,monospace}";
+/// The app theme a frame is drawn for.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Theme {
+    Light,
+    Dark,
+}
+
+/// How a mail document is colored.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Look {
+    /// The sender's colors on a white page: light mode, and "Original
+    /// colors" in dark mode.
+    Light,
+    /// The dark theme's colors, for plain text and HTML without colors.
+    Dark,
+    /// HTML with its own colors in dark mode: the document is inverted and
+    /// its pictures inverted back, as mail clients do.
+    Inverted,
+}
+
+/// The view a request asks for.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct View {
+    pub theme: Theme,
+    pub images: bool,
+    pub original: bool,
+}
+
+impl View {
+    pub fn parse(query: &str) -> View {
+        let has = |kv: &str| query.split('&').any(|q| q == kv);
+        View {
+            theme: if has("theme=dark") {
+                Theme::Dark
+            } else {
+                Theme::Light
+            },
+            images: has("images=1"),
+            original: has("original=1"),
+        }
+    }
+}
+
+const BASE_CSS: &str = "body{margin:0;padding:20px 24px;\
+font:14px/1.6 system-ui,-apple-system,'Segoe UI',sans-serif;overflow-wrap:anywhere}\
+img{max-width:100%;height:auto}\
+.plain{white-space:pre-wrap}pre{white-space:pre-wrap;margin:0;font:13px/1.55 ui-monospace,'Cascadia Mono',Menlo,monospace}";
+
+/// Light: white paper. Dark: the app's dark surface (`--raised`) and text.
+/// Inverted: `#dddddd` inverts to that same `#222222`, so the page edge
+/// matches the app; pictures (and anything with a background image) are
+/// inverted back so photos and logos look right.
+fn look_css(look: Look) -> &'static str {
+    match look {
+        Look::Light => "html{background:#fff;color:#1a1a19;color-scheme:light}a{color:#1f4fd1}",
+        Look::Dark => {
+            "html{background:#222;color:#e9e8e3;color-scheme:dark}a{color:#ffd23f}\
+             hr{border-color:#3a3a3a}"
+        }
+        Look::Inverted => {
+            "html{background:#222;color-scheme:light}\
+             body{background:#ddd;color:#1a1a19;min-height:100vh;box-sizing:border-box;\
+             filter:invert(1) hue-rotate(180deg)}a{color:#1f4fd1}\
+             img,picture,video,svg,[style*=\"url(\"]{filter:invert(1) hue-rotate(180deg)}\
+             [style*=\"url(\"] :is(img,picture,video,svg,[style*=\"url(\"]){filter:none}"
+        }
+    }
+}
+
+/// How a mail is colored in `view`. `html` is the sanitized body, or
+/// `None` for a plain-text mail.
+pub fn look(view: View, html: Option<&str>) -> Look {
+    match (view.theme, view.original) {
+        (Theme::Light, _) | (Theme::Dark, true) => Look::Light,
+        (Theme::Dark, false) if html.is_some_and(has_own_colors) => Look::Inverted,
+        (Theme::Dark, false) => Look::Dark,
+    }
+}
 
 pub fn handle(
     _app: &AppHandle,
@@ -72,7 +148,7 @@ pub fn handle(
     let segments: Vec<&str> = path.trim_start_matches('/').split('/').collect();
     match segments.as_slice() {
         ["mail", key] => {
-            let images = query.split('&').any(|kv| kv == "images=1");
+            let view = View::parse(&query);
             let found = key.parse().ok().and_then(|key| {
                 let mails = shared.mails.lock().expect("mails lock");
                 mails.get(key).map(|m| (key, m.msg.clone()))
@@ -83,9 +159,39 @@ pub fn handle(
             // Sanitizing a big mail takes a while: not on the webview's
             // thread.
             tauri::async_runtime::spawn_blocking(move || {
-                let doc = mail_document(&msg, key, images);
-                responder.respond(document(&doc, &mail_csp(images)));
+                let doc = mail_document(&msg, key, view);
+                responder.respond(document(&doc, &mail_csp(view.images)));
             });
+        }
+        ["mail", key, "source"] => {
+            let theme = View::parse(&query).theme;
+            let Ok(key) = key.parse::<u64>() else {
+                return responder.respond(not_found());
+            };
+            let cached = {
+                let mails = shared.mails.lock().expect("mails lock");
+                match mails.get(key) {
+                    None => return responder.respond(not_found()),
+                    Some(m) => m.source.clone(),
+                }
+            };
+            match (cached, shared.worker.get()) {
+                (Some(text), _) => {
+                    // A raw source can be megabytes: not on the webview's thread.
+                    tauri::async_runtime::spawn_blocking(move || {
+                        responder.respond(source_response(&text, theme));
+                    });
+                }
+                (None, Some(tx)) => {
+                    // The worker answers (raw sources come from the provider).
+                    let _ = tx.send(Req::Source {
+                        key,
+                        theme,
+                        responder,
+                    });
+                }
+                (None, None) => responder.respond(not_found()),
+            }
         }
         ["mail", key, "cid", cid] => {
             let (Ok(key), Some(cid)) = (key.parse::<u64>(), percent_decode(cid)) else {
@@ -120,34 +226,53 @@ pub fn handle(
     }
 }
 
-/// The sanitized document for `msg`.
-fn mail_document(msg: &Message, key: u64, images: bool) -> String {
-    let text;
-    let html = match (&msg.html, &msg.text) {
-        (Some(h), _) => h.as_str(),
-        (None, Some(t)) => {
-            text = format!("<pre>{}</pre>", escape_html(t));
-            text.as_str()
-        }
-        (None, None) => "",
-    };
+/// The sanitized document for `msg`, colored for `view`.
+pub fn mail_document(msg: &Message, key: u64, view: View) -> String {
     let cid_base = format!("{}/mail/{key}/cid/", origin());
-    let body = sanitize_mail_html(
-        html,
-        images,
-        Some(&Frame {
-            cid_base: &cid_base,
-        }),
-    );
-    wrap(&body)
+    let frame = Frame {
+        cid_base: &cid_base,
+    };
+    match (&msg.html, &msg.text) {
+        (Some(h), _) => {
+            let body = sanitize_mail_html(h, view.images, Some(&frame));
+            // Colors are judged with images allowed, so loading images
+            // never switches a mail between the dark and inverted looks.
+            let look = if view.images || view.theme == Theme::Light || view.original {
+                look(view, Some(&body))
+            } else {
+                look(view, Some(&sanitize_mail_html(h, true, Some(&frame))))
+            };
+            wrap(&body, look)
+        }
+        (None, Some(t)) => {
+            let body = format!("<div class=\"plain\">{}</div>", escape_html(t));
+            wrap(&body, look(view, None))
+        }
+        (None, None) => wrap("", look(view, None)),
+    }
 }
 
 /// A full document around a sanitized body.
-pub fn wrap(body: &str) -> String {
+pub fn wrap(body: &str, look: Look) -> String {
+    let css = look_css(look);
     format!(
         "<!doctype html>\n<html><head><meta charset=\"utf-8\">\
-         <meta name=\"referrer\" content=\"no-referrer\"><style>{FRAME_CSS}</style>\
+         <meta name=\"referrer\" content=\"no-referrer\"><style>{BASE_CSS}{css}</style>\
          </head><body>\n{body}\n</body></html>\n"
+    )
+}
+
+/// A message source as escaped text, under the strictest policy: no
+/// images at all.
+pub fn source_response(text: &str, theme: Theme) -> Response<Vec<u8>> {
+    let look = match theme {
+        Theme::Light => Look::Light,
+        Theme::Dark => Look::Dark,
+    };
+    let doc = wrap(&format!("<pre>{}</pre>", escape_html(text)), look);
+    html_response(
+        &doc,
+        Some("default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'"),
     )
 }
 
@@ -299,6 +424,54 @@ mod tests {
         assert_eq!(find("y.svg"), None);
         assert_eq!(find("page.html"), None);
         assert_eq!(find("nothing"), None);
+    }
+
+    #[test]
+    fn the_view_comes_from_the_query_only() {
+        let v = View::parse("theme=dark&images=1");
+        assert_eq!(v.theme, Theme::Dark);
+        assert!(v.images && !v.original);
+        assert_eq!(View::parse("").theme, Theme::Light);
+        assert_eq!(View::parse("theme=darkish").theme, Theme::Light);
+    }
+
+    #[test]
+    fn dark_mail_is_dark() {
+        let colored = Message {
+            html: Some(r##"<table bgcolor="#ffffff"><tr><td>Hi</td></tr></table>"##.into()),
+            ..Default::default()
+        };
+        let bare = Message {
+            html: Some("<p>Hi <b>there</b></p>".into()),
+            ..Default::default()
+        };
+        let text = Message {
+            text: Some("Code: 123456 <b>".into()),
+            ..Default::default()
+        };
+        let dark = View::parse("theme=dark");
+        let original = View::parse("theme=dark&original=1");
+        let light = View::parse("theme=light");
+        assert!(mail_document(&colored, 1, dark).contains("invert(1)"));
+        assert!(!mail_document(&colored, 1, original).contains("invert(1)"));
+        assert!(mail_document(&colored, 1, light).contains("background:#fff"));
+        let doc = mail_document(&bare, 1, dark);
+        assert!(doc.contains("background:#222") && !doc.contains("invert(1)"));
+        let doc = mail_document(&text, 1, dark);
+        assert!(doc.contains("color-scheme:dark"), "{doc}");
+        assert!(doc.contains("&lt;b&gt;"), "{doc}");
+    }
+
+    #[test]
+    fn loading_images_keeps_the_look() {
+        let hero = Message {
+            html: Some(r#"<div style="background:url(https://x.example/h.png)">Hi</div>"#.into()),
+            ..Default::default()
+        };
+        let off = mail_document(&hero, 1, View::parse("theme=dark"));
+        let on = mail_document(&hero, 1, View::parse("theme=dark&images=1"));
+        assert!(off.contains("invert(1)") && on.contains("invert(1)"));
+        assert!(!off.contains("x.example"));
     }
 
     #[test]

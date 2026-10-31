@@ -1,11 +1,13 @@
-//! tmpmail's desktop app (spike). The window lists the stored inboxes (the
-//! CLI's state file), creates new ones, lists their mail and previews one
-//! message through the `tmpmail-mail` scheme. See `gui/README.md` for the
-//! security model.
+//! tmpmail's desktop app. The window shows the stored inboxes (the CLI's
+//! state file), their mail as it arrives, and one message at a time through
+//! the `tmpmail-mail` scheme. Every privileged action (clipboard, links,
+//! saving files) is a command here, never a plugin permission of the page.
+//! See `gui/README.md` for the security model.
 
 // No console window on Windows release builds.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod commands;
 mod scheme;
 mod worker;
 
@@ -16,11 +18,12 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex, OnceLock};
 
-use serde_json::{Value, json};
 use tauri::webview::NewWindowResponse;
-use tauri::{Manager, State, Url, WebviewUrl, WebviewWindowBuilder};
+use tauri::{Manager, Url, WebviewUrl, WebviewWindowBuilder};
 use tauri_plugin_opener::OpenerExt;
-use tmpmail::provider::{self, Message};
+use tmpmail::extract;
+use tmpmail::provider::Message;
+use tmpmail::render::body_text;
 
 use crate::worker::Req;
 
@@ -33,17 +36,27 @@ pub struct Shared {
     /// Why the worker couldn't start (an unreadable config or state file).
     pub start_error: OnceLock<String>,
     pub mails: Mutex<Mails>,
+    /// The stored inboxes as the worker last saw them (address to provider
+    /// id), so commands can refuse addresses that aren't stored.
+    pub inboxes: Mutex<HashMap<String, String>>,
     #[cfg(debug_assertions)]
     pub probe: Option<probe::Probe>,
 }
 
-/// An opened message, kept so the scheme can serve it and its images.
+/// An opened message, kept so the scheme can serve it and its images, and
+/// the commands can copy or open what was found in it.
 pub struct Mail {
     pub address: String,
     /// Shared so the scheme and the worker can use it without the lock.
     pub msg: Arc<Message>,
+    /// The verification code `extract` found, if any.
+    pub code: Option<String>,
+    /// http(s) links, likely action links first.
+    pub links: Vec<String>,
     /// Inline images already in memory, by content id: (type, bytes).
     pub inline: HashMap<String, (String, Vec<u8>)>,
+    /// The message source once fetched (raw MIME, or the HTML body).
+    pub source: Option<Arc<String>>,
 }
 
 /// Opened messages by key. Keys are never reused, so a frame can't show a
@@ -56,10 +69,22 @@ pub struct Mails {
 
 impl Mails {
     pub fn entry(address: &str, msg: Message) -> Mail {
+        let body = body_text(msg.text.as_deref(), msg.html.as_deref(), 200);
+        let code = extract::otp(&msg.subject, &body, None);
+        let links = extract::links(
+            msg.text.as_deref().unwrap_or_default(),
+            msg.html.as_deref().unwrap_or_default(),
+        )
+        .into_iter()
+        .filter(|l| commands::web_url(l).is_some())
+        .collect();
         Mail {
             address: address.to_string(),
             msg: Arc::new(msg),
+            code,
+            links,
             inline: HashMap::new(),
+            source: None,
         }
     }
 
@@ -79,58 +104,6 @@ impl Mails {
     pub fn get_mut(&mut self, key: u64) -> Option<&mut Mail> {
         self.map.get_mut(&key)
     }
-}
-
-fn send(shared: &Shared, req: Req) -> Result<(), String> {
-    if let Some(e) = shared.start_error.get() {
-        return Err(e.clone());
-    }
-    shared
-        .worker
-        .get()
-        .ok_or("the worker is not running")?
-        .send(req)
-        .map_err(|_| "the worker stopped".to_string())
-}
-
-/// What the window needs to start: the mail scheme's origin and the
-/// providers. Also asks the worker for the inbox list and every inbox's
-/// mail, since the window listens for events only once it has loaded.
-/// Fails with the reason if the config or state couldn't be loaded.
-#[tauri::command]
-fn init(shared: State<'_, Arc<Shared>>) -> Result<Value, String> {
-    #[cfg(debug_assertions)]
-    let probe = shared.probe.as_ref().map(|p| p.on_init(&shared));
-    #[cfg(not(debug_assertions))]
-    let probe: Option<Value> = None;
-
-    let providers: Vec<Value> = provider::all()
-        .filter_map(|id| provider::get(id).ok())
-        .map(|p| {
-            let caps = p.caps();
-            json!({ "id": p.id(), "name": p.name(), "private": caps.private, "attachments": caps.attachments })
-        })
-        .collect();
-    send(&shared, Req::Refresh)?;
-    Ok(json!({ "origin": scheme::origin(), "providers": providers, "probe": probe }))
-}
-
-#[tauri::command]
-fn create_inbox(shared: State<'_, Arc<Shared>>, provider: Option<String>) -> Result<(), String> {
-    if let Some(id) = &provider {
-        provider::get(id).map_err(|e| e.to_string())?;
-    }
-    send(&shared, Req::Create { provider })
-}
-
-#[tauri::command]
-fn select_inbox(shared: State<'_, Arc<Shared>>, address: String) -> Result<(), String> {
-    send(&shared, Req::Select { address })
-}
-
-#[tauri::command]
-fn open_message(shared: State<'_, Arc<Shared>>, address: String, id: String) -> Result<(), String> {
-    send(&shared, Req::Open { address, id })
 }
 
 /// Only the app's own pages may load in the main webview. (`Url::origin`
@@ -173,30 +146,51 @@ fn main() {
         worker: OnceLock::new(),
         start_error: OnceLock::new(),
         mails: Mutex::new(Mails::default()),
+        inboxes: Mutex::new(HashMap::new()),
         #[cfg(debug_assertions)]
         probe: probe::Probe::from_env(),
     });
 
     let for_scheme = shared.clone();
+    // Plugins are used from Rust only: the page has no permission for any
+    // of them (see capabilities/main.json).
     let builder = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_clipboard_manager::init())
+        .plugin(tauri_plugin_dialog::init())
         .register_asynchronous_uri_scheme_protocol(scheme::SCHEME, move |ctx, req, responder| {
             scheme::handle(ctx.app_handle(), &for_scheme, req, responder)
         });
     #[cfg(debug_assertions)]
     let builder = builder.invoke_handler(tauri::generate_handler![
-        init,
-        create_inbox,
-        select_inbox,
-        open_message,
+        commands::init,
+        commands::domains,
+        commands::create_inbox,
+        commands::select_inbox,
+        commands::use_inbox,
+        commands::delete_inbox,
+        commands::open_message,
+        commands::delete_message,
+        commands::copy_address,
+        commands::copy_from_message,
+        commands::open_link,
+        commands::save_attachment,
         probe::probe_finish
     ]);
     #[cfg(not(debug_assertions))]
     let builder = builder.invoke_handler(tauri::generate_handler![
-        init,
-        create_inbox,
-        select_inbox,
-        open_message
+        commands::init,
+        commands::domains,
+        commands::create_inbox,
+        commands::select_inbox,
+        commands::use_inbox,
+        commands::delete_inbox,
+        commands::open_message,
+        commands::delete_message,
+        commands::copy_address,
+        commands::copy_from_message,
+        commands::open_link,
+        commands::save_attachment
     ]);
 
     let result = builder
@@ -219,8 +213,8 @@ fn main() {
             let for_popups = shared.clone();
             WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
                 .title("tmpmail")
-                .inner_size(1180.0, 760.0)
-                .min_inner_size(820.0, 520.0)
+                .inner_size(1240.0, 780.0)
+                .min_inner_size(900.0, 560.0)
                 .on_navigation(|url| {
                     let ok = app_page(url);
                     if std::env::var_os("TMPMAIL_GUI_LOG").is_some() {
@@ -266,5 +260,22 @@ mod tests {
         assert!(!ok("http://localhost:8080/"));
         assert!(!ok("https://example.com/"));
         assert!(!ok("tmpmail-mail://evil/mail/1"));
+    }
+
+    #[test]
+    fn opened_mail_keeps_its_code_and_web_links_only() {
+        let msg = Message {
+            subject: "Your verification code".into(),
+            text: Some(
+                "Use 482913 to sign in. https://example.com/verify?t=1 \
+                 javascript:alert(1) http://plain.example/x"
+                    .into(),
+            ),
+            ..Default::default()
+        };
+        let mail = Mails::entry("a@x.com", msg);
+        assert_eq!(mail.code.as_deref(), Some("482913"));
+        assert_eq!(mail.links[0], "https://example.com/verify?t=1");
+        assert!(mail.links.iter().all(|l| l.starts_with("http")));
     }
 }

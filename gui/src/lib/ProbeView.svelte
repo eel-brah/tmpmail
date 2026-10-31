@@ -46,12 +46,12 @@
     <h1 class="text-lg font-semibold">Preview probe</h1>
     <p class="text-muted">{status} ({loaded}/{total} frames)</p>
   </header>
-  <div class="grid min-h-0 flex-1 grid-cols-3 gap-3">
+  <div class="grid min-h-0 flex-1 grid-cols-4 gap-3">
     {#each plan.real as r (r.name)}
       <section class="flex min-h-0 flex-col rounded-md border border-rule bg-raised">
         <h2 class="px-3 py-1.5 text-xs font-medium">{r.name}: the real preview</h2>
         <div class="min-h-0 flex-1">
-          <Preview {origin} mailKey={r.key} images={r.images} title={r.name} onload={frameLoaded} />
+          <Preview {origin} mailKey={r.key} images={r.images} theme={r.theme} title={r.name} onload={frameLoaded} />
         </div>
       </section>
     {/each}

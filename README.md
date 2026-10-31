@@ -1,3 +1,5 @@
+<p align="center"><img src="assets/logo.svg" alt="" width="88" height="88"></p>
+
 # tmpmail
 
 Disposable email for scripts, tests and AI agents. Make an address, sign up with it, and
@@ -116,6 +118,19 @@ verification code is highlighted, and `y` copies it.
 
 The [guide](#guide) below shows each feature in a few lines, and [all commands](#commands)
 are listed under Reference.
+
+### Desktop app (in development)
+
+A desktop app for people who'd rather not live in a terminal is being built in
+[`gui/`](gui/README.md), on the same inboxes as the CLI. It shows your inboxes and their
+mail live, puts the verification code in a big banner with a Copy button, lists the
+verification link first, previews HTML mail safely (light or dark), saves attachments, and
+creates and deletes inboxes and messages, with the TUI's keyboard shortcuts. It isn't
+released yet: run it from source with Rust 1.90+, Node 24 and pnpm:
+
+```sh
+cd gui && pnpm install && pnpm tauri dev
+```
 
 ### Coming from the original tmpmail
 
@@ -382,7 +397,8 @@ cargo clippy --all-targets
 vhs assets/demo/demo.tape   # re-record the demo (needs vhs, and outbound SMTP for the test mail)
 ```
 
-A desktop app is in early development in [`gui/`](gui/README.md). It is not released yet.
+A desktop app is in development in [`gui/`](gui/README.md) (see
+[Desktop app](#desktop-app-in-development)). It is not released yet.
 
 ## License
 

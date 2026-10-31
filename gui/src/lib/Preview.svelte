@@ -3,21 +3,30 @@
   // handler (sanitized by ammonia, with its own CSP header) into a frame
   // that may open popups and nothing else: no scripts, no same-origin, so
   // it can't reach the app or Tauri's IPC. Never add allow-scripts or
-  // allow-same-origin here.
+  // allow-same-origin here. The theme and view options travel in the URL.
   interface Props {
     origin: string;
     mailKey: number;
-    images: boolean;
+    images?: boolean;
+    theme?: "light" | "dark";
+    original?: boolean;
+    source?: boolean;
     title: string;
     onload?: () => void;
   }
-  let { origin, mailKey, images, title, onload }: Props = $props();
+  let { origin, mailKey, images = false, theme = "light", original = false, source = false, title, onload }: Props =
+    $props();
 
-  let src = $derived(`${origin}/mail/${mailKey}${images ? "?images=1" : ""}`);
+  let src = $derived.by(() => {
+    const q = [`theme=${theme}`];
+    if (images && !source) q.push("images=1");
+    if (original && !source) q.push("original=1");
+    return `${origin}/mail/${mailKey}${source ? "/source" : ""}?${q.join("&")}`;
+  });
 </script>
 
 <iframe
-  class="h-full w-full border-0 bg-white"
+  class={["block h-full w-full border-0", theme === "dark" && !original ? "bg-[#222222]" : "bg-white"]}
   {src}
   {title}
   sandbox="allow-popups"

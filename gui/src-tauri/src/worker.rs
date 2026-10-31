@@ -12,11 +12,12 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 use serde_json::{Value, json};
 use tauri::{AppHandle, Emitter, UriSchemeResponder};
 use tmpmail::app::{App, Global};
-use tmpmail::provider::Summary;
+use tmpmail::provider::{self, CreateOpts, Summary};
+use tmpmail::render::clean_line;
 use tmpmail::watcher::{self, Watcher};
 
-use crate::scheme;
 use crate::{Mails, Shared};
+use crate::{commands, scheme};
 
 pub enum Req {
     /// The window just loaded: send the inbox list and every inbox's last
@@ -24,12 +25,24 @@ pub enum Req {
     Refresh,
     Create {
         provider: Option<String>,
+        opts: CreateOpts,
+        label: Option<String>,
     },
     /// List this inbox now instead of on its next tick.
     Select {
         address: String,
     },
+    Use {
+        address: String,
+    },
+    DeleteInbox {
+        address: String,
+    },
     Open {
+        address: String,
+        id: String,
+    },
+    DeleteMessage {
         address: String,
         id: String,
     },
@@ -38,6 +51,18 @@ pub enum Req {
         key: u64,
         cid: String,
         responder: UriSchemeResponder,
+    },
+    /// An opened message's source, for the mail scheme.
+    Source {
+        key: u64,
+        theme: scheme::Theme,
+        responder: UriSchemeResponder,
+    },
+    /// An opened message's attachment, for `save_attachment`.
+    Attachment {
+        key: u64,
+        index: usize,
+        reply: Sender<Result<Vec<u8>, String>>,
     },
 }
 
@@ -109,6 +134,14 @@ impl watcher::Front for Front {
     }
 
     fn inboxes(&mut self, app: &App) -> bool {
+        *self.shared.inboxes.lock().expect("inboxes lock") = app
+            .state
+            .inboxes
+            .iter()
+            .map(|i| (i.address.clone(), i.provider.clone()))
+            .collect();
+        self.last
+            .retain(|address, _| app.state.position(address).is_some());
         let inboxes: Vec<_> = app.state.inboxes.iter().map(|i| app.view(i)).collect();
         self.handle
             .emit("inboxes", json!({ "inboxes": inboxes }))
@@ -155,17 +188,82 @@ impl watcher::Front for Front {
                 w.poll_now(&address);
                 false
             }
-            Req::Create { provider } => {
-                match w.create(provider.as_deref()) {
+            Req::Create {
+                provider,
+                opts,
+                label,
+            } => {
+                match w.create_with(provider.as_deref(), &opts, label) {
                     Ok(address) => {
+                        // The list first: the window selects the new inbox
+                        // at once, and commands must already know it.
+                        watcher::Front::inboxes(self, &w.app);
                         let _ = self.handle.emit("created", json!({ "address": address }));
                     }
-                    Err(e) => self.notice("error", &e),
+                    Err(e) => {
+                        let text = format!(
+                            "{}. Try another provider, or leave the options empty.",
+                            capital(&e)
+                        );
+                        let _ = self.handle.emit("create_failed", json!({ "text": text }));
+                    }
+                }
+                false
+            }
+            Req::Use { address } => {
+                match w.make_active(&address) {
+                    Ok(()) => {
+                        self.notice("success", &format!("{} is now the active inbox", address))
+                    }
+                    Err(e) => {
+                        self.notice("error", &format!("Couldn't make it the active inbox: {e}"))
+                    }
+                }
+                true
+            }
+            Req::DeleteInbox { address } => {
+                let name = provider_name(&w.app, &address);
+                let mut problems = Vec::new();
+                let known = w.drop_inbox(&address, |what, e| problems.push(format!("{what}: {e}")));
+                if known && problems.is_empty() {
+                    self.notice("success", &format!("Deleted {address}"));
+                } else if known {
+                    let text = format!("{name}: {}", problems.join("; "));
+                    self.notice("error", &text);
                 }
                 true
             }
             Req::Open { address, id } => {
                 self.open(&mut w.app, address, id);
+                false
+            }
+            Req::DeleteMessage { address, id } => {
+                let name = provider_name(&w.app, &address);
+                match w.delete_message(&address, &id) {
+                    Some(Ok(())) => {
+                        let _ = self
+                            .handle
+                            .emit("deleted", json!({ "address": address, "id": id }));
+                        self.notice("success", "Message deleted");
+                    }
+                    Some(Err(e)) => self.notice(
+                        "error",
+                        &format!("Couldn't delete the message at {name}: {e}. Refresh the inbox and try again."),
+                    ),
+                    None => {}
+                }
+                false
+            }
+            Req::Source {
+                key,
+                theme,
+                responder,
+            } => {
+                self.source(&mut w.app, key, theme, responder);
+                false
+            }
+            Req::Attachment { key, index, reply } => {
+                let _ = reply.send(self.attachment(&mut w.app, key, index));
                 false
             }
             Req::Inline {
@@ -187,21 +285,33 @@ impl Front {
         };
         let payload = match app.with_inbox_at(n, |p, inbox| p.get(inbox, &id)) {
             Ok(msg) => {
+                let mail = Mails::entry(&address, msg);
+                let msg = &mail.msg;
+                let attachments: Vec<_> = msg
+                    .attachments
+                    .iter()
+                    .map(|a| {
+                        json!({
+                            "filename": clean_line(&a.filename),
+                            "content_type": clean_line(&a.content_type),
+                            "size": a.size,
+                        })
+                    })
+                    .collect();
                 let mut event = json!({
                     "address": address,
                     "id": id,
-                    "from": msg.from,
-                    "to": msg.to,
-                    "subject": msg.subject,
+                    "from": clean_line(&msg.from),
+                    "to": msg.to.iter().map(|t| clean_line(t)).collect::<Vec<_>>(),
+                    "subject": clean_line(&msg.subject),
                     "date": msg.date,
-                    "attachments": msg.attachments,
+                    "attachments": attachments,
+                    "code": mail.code,
+                    "sender": commands::sender_address(&msg.from),
+                    "links": mail.links,
+                    "html": msg.html.is_some(),
                 });
-                let key = self
-                    .shared
-                    .mails
-                    .lock()
-                    .expect("mails lock")
-                    .insert(Mails::entry(&address, msg));
+                let key = self.shared.mails.lock().expect("mails lock").insert(mail);
                 event["key"] = json!(key);
                 event
             }
@@ -246,4 +356,92 @@ impl Front {
         }
         responder.respond(scheme::image(&mime, bytes));
     }
+
+    /// The opened message's source: raw MIME where the provider has it,
+    /// else its HTML body. Fetched once, then kept with the message.
+    fn source(&self, app: &mut App, key: u64, theme: scheme::Theme, responder: UriSchemeResponder) {
+        let found = {
+            let mails = self.shared.mails.lock().expect("mails lock");
+            mails
+                .get(key)
+                .map(|m| (m.source.clone(), m.address.clone(), m.msg.clone()))
+        };
+        let (address, msg) = match found {
+            None => return responder.respond(scheme::not_found()),
+            Some((Some(text), ..)) => {
+                return responder.respond(scheme::source_response(&text, theme));
+            }
+            Some((None, address, msg)) => (address, msg),
+        };
+        let body = || {
+            msg.html
+                .clone()
+                .or_else(|| msg.text.clone())
+                .unwrap_or_default()
+        };
+        // Only a source that was really read is kept: errors are retried
+        // the next time.
+        let (text, keep) = match app.state.position(&address) {
+            None => (
+                "This message's inbox was deleted, so its source can't be fetched.".to_string(),
+                false,
+            ),
+            Some(n) => {
+                let id = app.state.inboxes[n].provider.clone();
+                if provider::get(&id).is_ok_and(|p| p.caps().raw) {
+                    match app.with_inbox_at(n, |p, inbox| p.raw(inbox, &msg.id)) {
+                        Ok(bytes) => (String::from_utf8_lossy(&bytes).into_owned(), true),
+                        Err(e) => (
+                            format!(
+                                "Couldn't fetch the source: {e}. Turn Source off and on to try again."
+                            ),
+                            false,
+                        ),
+                    }
+                } else {
+                    (body(), true)
+                }
+            }
+        };
+        let text = Arc::new(text);
+        if keep && let Some(m) = self.shared.mails.lock().expect("mails lock").get_mut(key) {
+            m.source = Some(text.clone());
+        }
+        // Escaping a big source takes a while: off this thread too.
+        tauri::async_runtime::spawn_blocking(move || {
+            responder.respond(scheme::source_response(&text, theme));
+        });
+    }
+
+    fn attachment(&self, app: &mut App, key: u64, index: usize) -> Result<Vec<u8>, String> {
+        let (address, msg) = {
+            let mails = self.shared.mails.lock().expect("mails lock");
+            let m = mails.get(key).ok_or("that message is no longer open")?;
+            (m.address.clone(), m.msg.clone())
+        };
+        let att = msg.attachments.get(index).ok_or("no such attachment")?;
+        let n = app
+            .state
+            .position(&address)
+            .ok_or("that inbox was deleted")?;
+        let name = provider_name(app, &address);
+        app.with_inbox_at(n, |p, inbox| p.attachment(inbox, &msg, att))
+            .map_err(|e| format!("Couldn't download it from {name}: {e}. Try again in a moment."))
+    }
+}
+
+/// The display name of an inbox's provider.
+fn provider_name(app: &App, address: &str) -> &'static str {
+    app.state
+        .position(address)
+        .and_then(|n| provider::get(&app.state.inboxes[n].provider).ok())
+        .map_or("the provider", |p| p.name())
+}
+
+/// The core's messages start lower case; notices are sentences.
+fn capital(s: &str) -> String {
+    let mut c = s.chars();
+    c.next()
+        .map(|f| f.to_uppercase().chain(c).collect())
+        .unwrap_or_default()
 }

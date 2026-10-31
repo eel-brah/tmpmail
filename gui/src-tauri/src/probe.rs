@@ -34,6 +34,10 @@ const PNG: &[u8] = &[
 
 const CID: &str = "probe-logo@tmpmail";
 
+/// The test mail through the real preview: plain, with images loaded, and
+/// in dark mode (where the test mail's own colors make it inverted).
+const REAL: [&str; 3] = ["real", "real_images", "real_dark"];
+
 /// Frames that serve the raw (unsanitized) mail, each without one of the
 /// layers, as (name, CSP header, iframe sandbox attribute).
 const CONTROLS: &[(&str, bool, Option<&str>)] = &[
@@ -88,7 +92,7 @@ impl Probe {
             }
         });
 
-        for name in ["real", "real_images"] {
+        for name in REAL {
             let mut mail = Mails::entry("probe@tmpmail.invalid", self.message(name));
             mail.inline
                 .insert(CID.to_string(), ("image/png".into(), PNG.to_vec()));
@@ -167,7 +171,14 @@ impl Probe {
         let keys = self.keys.lock().unwrap().clone();
         let real: Vec<Value> = keys
             .iter()
-            .map(|(name, key)| json!({ "name": name, "key": key, "images": name == "real_images" }))
+            .map(|(name, key)| {
+                json!({
+                    "name": name,
+                    "key": key,
+                    "images": name == "real_images",
+                    "theme": if name == "real_dark" { "dark" } else { "light" },
+                })
+            })
             .collect();
         let controls: Vec<Value> = CONTROLS
             .iter()
@@ -201,7 +212,10 @@ impl Probe {
             ["doc", name] => match CONTROLS.iter().find(|(n, ..)| n == name) {
                 Some((name, csp, _)) => {
                     let csp = csp.then(|| scheme::mail_csp(false));
-                    html_response(&scheme::wrap(&self.hostile_html(name)), csp.as_deref())
+                    html_response(
+                        &scheme::wrap(&self.hostile_html(name), scheme::Look::Light),
+                        csp.as_deref(),
+                    )
                 }
                 None => scheme::not_found(),
             },
@@ -254,9 +268,19 @@ impl Probe {
         let https_dropped =
             !sanitize_mail_html(https_img, false, Some(&frame)).contains("tmpmail.invalid");
         let windows = app.webview_windows().len();
+        // Dark mode adds a document path: the test mail sets its own colors,
+        // so it must come out inverted (and still script-free, above).
+        let dark =
+            scheme::mail_document(&self.message("check"), 0, scheme::View::parse("theme=dark"));
+        let dark_inverted = dark.contains("invert(1)") && !dark.contains("<script");
+        // With images off, a style keeps its colors but loses its url(...).
+        let style_kept = sanitized.contains("color:#0a7a3a") && !sanitized.contains("style-attr");
 
         let checks = json!({
             "real_frame_ran_no_code": !ran("real") && !ran("real_images"),
+            "dark_frame_ran_no_code": !ran("real_dark") && requests.iter().any(|r| r.contains("theme=dark")),
+            "dark_document_is_inverted": dark_inverted,
+            "sanitizer_keeps_style_colors_without_urls": style_kept,
             "csp_header_alone_blocks_scripts": !ran("raw_csp"),
             "csp_header_alone_blocks_remote_image": !remote_hit("raw_csp"),
             "sandbox_alone_blocks_scripts": !ran("raw_sandbox"),
@@ -264,7 +288,7 @@ impl Probe {
             "internals_absent_in_sandboxed_frame": has("raw_scripts-internals-absent") && !has("raw_scripts-invoke-ok"),
             "no_invoke_from_any_frame": !hits.iter().any(|h| h.ends_with("-invoke-ok")),
             "init_called_once": self.init_calls.load(Ordering::SeqCst) == 1,
-            "remote_image_not_loaded": !remote_hit("real") && !remote_hit("real_images"),
+            "remote_image_not_loaded": REAL.iter().all(|v| !remote_hit(v)),
             "sanitizer_drops_remote_images": !sanitized.contains(&remote_base) && https_dropped,
             "sanitizer_drops_http_images_with_images_on": !sanitized_images.contains(&remote_base),
             "sanitizer_keeps_https_images_with_images_on": https_kept,
@@ -280,7 +304,7 @@ impl Probe {
             .values()
             .all(|v| v.as_bool() == Some(true));
 
-        let variants: serde_json::Map<String, Value> = ["real", "real_images"]
+        let variants: serde_json::Map<String, Value> = REAL
             .iter()
             .copied()
             .chain(CONTROLS.iter().map(|(n, ..)| *n))
