@@ -1,9 +1,27 @@
-The first preview of tmpmail's desktop app, for Linux, macOS and Windows. It is built on the
-same core as the `tmpmail` command-line tool and shares its inboxes and `config.toml`.
+tmpmail desktop 0.1.1 fixes what a first test round on a clean Windows 11 found. It is
+built on the same core as the `tmpmail` command-line tool (0.3.2) and shares its inboxes and
+`config.toml`.
 
-**This is a preview.** It works on Linux; the macOS and Windows builds come from CI and have
-only been checked by the automated security probe, not clicked through on a real machine.
-Please report what breaks: <https://github.com/qorvyx/tmpmail/issues>.
+**This is a preview.** It works on Linux; Windows 0.1.0 was tried by hand once, and macOS
+has only been checked by the automated security probe. Please report what breaks:
+<https://github.com/qorvyx/tmpmail/issues>.
+
+## What's new in 0.1.1
+
+- **Windows: clicking a notification opens the message**, also from the notification
+  center after the toast is gone. The installed app shows its own toasts, which launch a
+  `tmpmail-desktop:` link the installer registers; the app restores its window (or starts)
+  and opens that inbox and message. Starting the app a second time now brings back the
+  one that runs.
+- **Opening a message marks it read**: the unread dot and the sidebar count update at once,
+  and the mark is saved with the inbox, so `tmpmail ls` and the TUI agree (with CLI 0.3.2).
+- **Small screens:** the window opens within the screen's work area (it was 1240×780
+  whatever the screen), and every dialog keeps its title and buttons in view with a
+  scrolling body. Settings' Save button was off-screen on a 720-pixel-high screen.
+- **"Live" stays on for mail.tm**: the push connection was dropped and redone every 75
+  seconds, so "Live" blinked off (after new mail, among other times). It now stays up, and
+  a quick reconnect doesn't hide it.
+- **The Windows installer** shows the tmpmail icon, header and sidebar instead of NSIS's.
 
 ## What it does
 
@@ -30,16 +48,16 @@ Please report what breaks: <https://github.com/qorvyx/tmpmail/issues>.
 
 | System | File |
 |---|---|
-| Windows 10/11 (x64) | `tmpmail-desktop-0.1.0-x64-setup.exe` |
-| macOS 10.15+ (Apple silicon and Intel) | `tmpmail-desktop-0.1.0-universal.dmg` |
-| Debian, Ubuntu (x86_64) | `tmpmail-desktop-0.1.0-amd64.deb` |
-| Fedora and other RPM-based (x86_64) | `tmpmail-desktop-0.1.0-x86_64.rpm` |
-| Other Linux (x86_64) | `tmpmail-desktop-0.1.0-x86_64.AppImage` |
+| Windows 10/11 (x64) | `tmpmail-desktop-0.1.1-x64-setup.exe` |
+| macOS 10.15+ (Apple silicon and Intel) | `tmpmail-desktop-0.1.1-universal.dmg` |
+| Debian, Ubuntu (x86_64) | `tmpmail-desktop-0.1.1-amd64.deb` |
+| Fedora and other RPM-based (x86_64) | `tmpmail-desktop-0.1.1-x86_64.rpm` |
+| Other Linux (x86_64) | `tmpmail-desktop-0.1.1-x86_64.AppImage` |
 
 Check a download against `SHA256SUMS`, or its build attestation:
 
 ```sh
-gh attestation verify tmpmail-desktop-0.1.0-x86_64.AppImage --repo qorvyx/tmpmail
+gh attestation verify tmpmail-desktop-0.1.1-x86_64.AppImage --repo qorvyx/tmpmail
 ```
 
 ## Installing an unsigned app
@@ -56,15 +74,15 @@ The app isn't signed with a paid certificate, so each system warns once.
   fetches WebView2 if it's missing. If **Smart App Control** is on, it blocks the installer
   outright with no way past; it can only be turned off as a whole (Windows Security → App &
   browser control).
-- **Linux:** `sudo apt install ./tmpmail-desktop-0.1.0-amd64.deb`, or `sudo dnf install
-  ./tmpmail-desktop-0.1.0-x86_64.rpm`; both pull in WebKitGTK 4.1. The AppImage runs
+- **Linux:** `sudo apt install ./tmpmail-desktop-0.1.1-amd64.deb`, or `sudo dnf install
+  ./tmpmail-desktop-0.1.1-x86_64.rpm`; both pull in WebKitGTK 4.1. The AppImage runs
   as is after `chmod +x` (it may need `libfuse2`; without FUSE, run it with
   `--appimage-extract-and-run`). On NVIDIA, if the window stays blank, start it with
   `WEBKIT_DISABLE_DMABUF_RENDERER=1`.
 
-**Use tmpmail CLI 0.3.0 or later alongside the app.** The settings screen can write the
-`http_timeout` key to `config.toml`, which tmpmail 0.2.0 refuses (0.3.0 and later warn about
-keys they don't know).
+**Use tmpmail CLI 0.3.2 or later alongside the app.** The settings screen can write the
+`http_timeout` key to `config.toml`, which tmpmail 0.2.0 refuses, and a CLI older than 0.3.2
+drops the app's read marks when it rewrites an inbox.
 
 ## Known limits
 
@@ -75,5 +93,4 @@ keys they don't know).
   menu. Copying on pure Wayland needs a compositor with clipboard data-control support.
 - macOS: the notification permission prompt and the tray have not been tried on a real
   Mac. An ad-hoc signed app may be asked for permissions again after each update.
-- Windows: notification clicks work only while the toast is on screen.
 - x86_64 only on Linux and Windows for now.
