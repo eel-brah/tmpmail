@@ -150,21 +150,31 @@ jobs:
           ls -l out
       # The whole bundle must carry an ad-hoc signature: with only the
       # linker's signature on the executable, Apple silicon calls the app
-      # "damaged". Checked on the app inside the DMG, as shipped.
+      # "damaged". Checked on the app inside the DMG, as shipped. A DMG with a
+      # license agreement attached (`bundle.licenseFile`) makes hdiutil print
+      # it and wait for "Agree": the answer is fed in (`yes` through process
+      # substitution, so pipefail doesn't see its SIGPIPE), and the timeout
+      # bounds any other prompt.
       - name: Check the macOS signature
         if: runner.os == 'macOS'
+        timeout-minutes: 5
         run: |
           archs=$(lipo -archs "target/$TARGET/release/tmpmail-gui")
           echo "architectures: $archs"
           for a in arm64 x86_64; do
             grep -qw "$a" <<<"$archs" || { echo "::error::no $a in the universal binary"; exit 1; }
           done
+          dmg=(out/*.dmg)
+          if grep -q 'Software License Agreement: true' <<<"$(hdiutil imageinfo "${dmg[0]}" </dev/null)"; then
+            echo "::warning::the DMG has a license agreement: users get a prompt on every open"
+          fi
           mnt="$(mktemp -d)"
-          hdiutil attach -nobrowse -readonly -mountpoint "$mnt" out/*.dmg
+          PAGER=cat hdiutil attach -nobrowse -readonly -noautoopen -mountpoint "$mnt" "${dmg[0]}" \
+            < <(yes) > "$RUNNER_TEMP/attach.log" || { tail -n 20 "$RUNNER_TEMP/attach.log"; exit 1; }
           status=0
           codesign --verify --deep --strict --verbose=2 "$mnt/tmpmail.app" || status=$?
           codesign -dv "$mnt/tmpmail.app" 2>&1 | grep -E '^(Identifier|Format|Signature|CodeDirectory)' || true
-          hdiutil detach "$mnt"
+          hdiutil detach "$mnt" || { sleep 10; hdiutil detach -force "$mnt"; }
           exit "$status"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:

@@ -195,6 +195,14 @@ in `tauri.conf.json`:
   `StartupWMClass=tmpmail-gui`, which is the window's X11 class and its Wayland app ID
   (GTK takes both from the binary's name, since `enableGTKAppId` is off), so docks show the
   tmpmail icon.
+- **License:** every package carries the GPL text as a bundle resource (`LICENSE` next to
+  the app: `/usr/lib/tmpmail/LICENSE` on Linux and in the AppImage,
+  `tmpmail.app/Contents/Resources/LICENSE`, the install directory on Windows). The `.deb`
+  also has a DEP-5 `/usr/share/doc/tmpmail/copyright` (`src-tauri/packaging/copyright`),
+  and the `.rpm` has License `GPL-3.0-or-later` and `/usr/share/licenses/tmpmail/LICENSE`.
+  `bundle.licenseFile` is left out on purpose: the bundler would attach it to the DMG as a
+  click-through agreement (shown on every open) and add an "I accept" page to the NSIS
+  installer; the GPL asks for neither.
 - **macOS:** one universal app (Apple silicon and Intel), macOS 10.15 or later, **ad-hoc
   signed** (`signingIdentity: "-"`): with no signature on the whole bundle, Apple silicon
   reports the app as "damaged" with no way past. It isn't notarized, so users go through
@@ -217,7 +225,8 @@ in `tauri.conf.json`:
    that version, or if `Cargo.lock` is stale.
 3. Builds on `ubuntu-22.04`, `macos-latest` (universal) and `windows-latest`. A failed
    macOS build is retried once (DMG creation is flaky on runners), and the signature of the
-   app inside the DMG is checked with `codesign --verify --deep --strict`.
+   app inside the DMG is checked with `codesign --verify --deep --strict` (the DMG is
+   mounted with any license agreement answered, and a warning is printed if it has one).
 4. One publish job writes `SHA256SUMS`, attests every file
    (`gh attestation verify FILE --repo qorvyx/tmpmail`), and creates a **pre-release**
    titled "tmpmail desktop X.Y.Z (preview)", never marked latest (the CLI's release stays

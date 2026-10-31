@@ -36,11 +36,21 @@
     "longDescription": "tmpmail makes throwaway email addresses at several free providers, shows their mail as it arrives, puts the verification code in a banner with a Copy button, lists the verification link first, and previews HTML mail safely. It shares its inboxes and config.toml with the tmpmail command-line tool.",
     "copyright": "Copyright © 2026 Mehdi",
     "license": "GPL-3.0-or-later",
-    "licenseFile": "../../LICENSE",
+    "resources": {
+      "../../LICENSE": "LICENSE"
+    },
     "homepage": "https://github.com/qorvyx/tmpmail",
     "linux": {
       "deb": {
-        "section": "mail"
+        "section": "mail",
+        "files": {
+          "/usr/share/doc/tmpmail/copyright": "packaging/copyright"
+        }
+      },
+      "rpm": {
+        "files": {
+          "/usr/share/licenses/tmpmail/LICENSE": "../../LICENSE"
+        }
       },
       "appimage": {
         "bundleMediaFramework": false
