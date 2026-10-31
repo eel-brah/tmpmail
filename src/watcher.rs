@@ -10,7 +10,7 @@ use std::sync::mpsc::{Receiver, TryRecvError};
 use std::time::{Duration, Instant};
 
 use crate::app::{App, Global};
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::provider::{CreateOpts, Summary};
 use crate::push::Poller;
 
@@ -187,10 +187,21 @@ impl Watcher {
     /// Creates an inbox at `provider` (or the first that works) and saves
     /// it as the active one. Returns its address, or what went wrong.
     pub fn create(&mut self, provider: Option<&str>) -> std::result::Result<String, String> {
-        let inbox = self
+        self.create_with(provider, &CreateOpts::default(), None)
+    }
+
+    /// [`Watcher::create`] with options (a username, a domain) and a label.
+    pub fn create_with(
+        &mut self,
+        provider: Option<&str>,
+        opts: &CreateOpts,
+        label: Option<String>,
+    ) -> std::result::Result<String, String> {
+        let mut inbox = self
             .app
-            .create_with_fallback(provider, None, &CreateOpts::default())
+            .create_with_fallback(provider, None, opts)
             .map_err(|e| format!("could not create an inbox: {e}"))?;
+        inbox.label = label;
         let address = inbox.address.clone();
         let (state, ()) = self
             .app
@@ -199,6 +210,53 @@ impl Watcher {
             .map_err(|e| format!("could not save the new inbox: {e}"))?;
         self.app.state = state;
         Ok(address)
+    }
+
+    /// Makes `address` the active inbox (the CLI's default).
+    pub fn make_active(&mut self, address: &str) -> Result<()> {
+        let (state, ()) = self
+            .app
+            .store
+            .update(|s| s.active = Some(address.to_string()))?;
+        self.app.state = state;
+        Ok(())
+    }
+
+    /// Deletes a message at the provider, then lists the inbox again.
+    /// `None` when `address` isn't stored.
+    pub fn delete_message(&mut self, address: &str, id: &str) -> Option<Result<()>> {
+        let n = self.app.state.position(address)?;
+        let result = self
+            .app
+            .with_inbox_at(n, |p, inbox| p.delete_message(inbox, id));
+        if result.is_ok() {
+            self.poller.forget(address);
+        }
+        Some(result)
+    }
+
+    /// Deletes an inbox at the provider where it can be, and forgets it
+    /// locally either way. Problems go to `warn` with what was being done.
+    /// Returns false when `address` isn't stored.
+    pub fn drop_inbox(&mut self, address: &str, mut warn: impl FnMut(&str, Error)) -> bool {
+        let Some(n) = self.app.state.position(address) else {
+            return false;
+        };
+        let mut inbox = self.app.state.inboxes[n].clone();
+        if let Ok(p) = crate::provider::get(&inbox.provider) {
+            if let Err(e) = p.delete_inbox(&mut inbox) {
+                warn(
+                    "could not delete it at the provider, forgetting it locally",
+                    e,
+                );
+            }
+        }
+        if let Err(e) = self.app.forget(address) {
+            warn("could not forget the inbox", e);
+        }
+        self.poller.forget(address);
+        self.expired.remove(address);
+        true
     }
 }
 

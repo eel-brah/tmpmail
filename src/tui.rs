@@ -143,20 +143,21 @@ impl watcher::Front for Front {
 
     /// Carries out one request. Returns whether the inbox list changed.
     fn handle(&mut self, w: &mut Watcher, req: Req) -> bool {
-        let (app, poller, tx) = (&mut w.app, &mut w.poller, &self.tx);
+        let tx = &self.tx;
         let fail = |what: &str, e: crate::error::Error| {
             let _ = self.log.send(format!("{what}: {e}"));
         };
         match req {
             Req::Refresh(address) => {
-                poller.forget(&address); // makes it due now; the stream restarts
+                w.poller.forget(&address); // makes it due now; the stream restarts
                 false
             }
             Req::Open { address, id } => {
-                let Some(n) = app.state.position(&address) else {
+                let Some(n) = w.app.state.position(&address) else {
                     return false;
                 };
-                let result = app
+                let result = w
+                    .app
                     .with_inbox_at(n, |p, inbox| p.get(inbox, &id))
                     .map(Box::new)
                     .map_err(|e| e.to_string());
@@ -175,43 +176,23 @@ impl watcher::Front for Front {
                 true
             }
             Req::Use(address) => {
-                match app.store.update(|s| s.active = Some(address)) {
-                    Ok((state, ())) => app.state = state,
-                    Err(e) => fail("could not switch inbox", e),
+                if let Err(e) = w.make_active(&address) {
+                    fail("could not switch inbox", e);
                 }
                 true
             }
             Req::DeleteMessage { address, id } => {
-                if let Some(n) = app.state.position(&address) {
-                    match app.with_inbox_at(n, |p, inbox| p.delete_message(inbox, &id)) {
-                        Ok(()) => {
-                            let _ = tx.send(Ev::Deleted {
-                                address: address.clone(),
-                                id,
-                            });
-                            poller.forget(&address);
-                        }
-                        Err(e) => fail("could not delete the message", e),
+                match w.delete_message(&address, &id) {
+                    Some(Ok(())) => {
+                        let _ = self.tx.send(Ev::Deleted { address, id });
                     }
+                    Some(Err(e)) => fail("could not delete the message", e),
+                    None => {}
                 }
                 false
             }
             Req::Drop(address) => {
-                if let Some(n) = app.state.position(&address) {
-                    let mut inbox = app.state.inboxes[n].clone();
-                    if let Ok(p) = crate::provider::get(&inbox.provider) {
-                        if let Err(e) = p.delete_inbox(&mut inbox) {
-                            fail(
-                                "could not delete it at the provider, forgetting it locally",
-                                e,
-                            );
-                        }
-                    }
-                    if let Err(e) = app.forget(&address) {
-                        fail("could not forget the inbox", e);
-                    }
-                    poller.forget(&address);
-                }
+                w.drop_inbox(&address, fail);
                 true
             }
         }

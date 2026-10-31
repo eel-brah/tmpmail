@@ -8,8 +8,7 @@ pub mod app;
 pub mod cli;
 pub mod config;
 pub mod error;
-#[cfg(feature = "cli")]
-mod extract;
+pub mod extract;
 mod http;
 #[cfg(feature = "cli")]
 mod mcp;
