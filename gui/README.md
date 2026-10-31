@@ -98,10 +98,9 @@ pnpm tauri icon src/assets/logo.svg    # regenerate src-tauri/icons (keep only t
 window says why instead of starting), and `TMPMAIL_GUI_LOG=1` prints every request to the
 mail scheme and every navigation.
 
-The interface font is Bricolage Grotesque (OFL, bundled through
-`@fontsource-variable/bricolage-grotesque`, weight axis only, Latin subsets loaded on use);
-body text uses the system font. Icons are inline SVG in `src/lib/Icon.svelte`, drawn after
-Lucide's (ISC), so no icon package is needed.
+The interface uses the system UI font for body text and headings (no font is bundled), and
+the system monospace font for the verification code. Icons are inline SVG in
+`src/lib/Icon.svelte`, drawn after Lucide's (ISC), so no icon package is needed.
 
 ## The preview probe
 

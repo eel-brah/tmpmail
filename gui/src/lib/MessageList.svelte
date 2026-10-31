@@ -21,7 +21,7 @@
         title="{inbox.address} (click to copy)"
         onclick={() => app.copyAddress(inbox.address)}
       >
-        <span class="selectable min-w-0 truncate font-display text-lg leading-tight font-semibold tracking-tight">
+        <span class="selectable min-w-0 truncate text-lg leading-tight font-semibold tracking-title">
           {inbox.address}
         </span>
         <Icon name="copy" size={15} class="text-faint group-hover:text-ink" />
@@ -148,7 +148,7 @@
       {:else}
         <li class="px-6 py-10">
           {#if expired}
-            <p class="font-display text-md font-semibold">This inbox has expired</p>
+            <p class="text-md font-semibold">This inbox has expired</p>
             <p class="mt-1 text-xs text-muted">No more mail will arrive. Delete it, or make a new one.</p>
             <div class="mt-4 flex gap-2">
               <button class="btn" onclick={() => (app.confirm = { kind: "inbox", address: inbox.address })}>
@@ -161,7 +161,7 @@
           {:else if m?.loaded && !m.error}
             <div class="flex items-center gap-2.5">
               <span class="live-dot"></span>
-              <p class="font-display text-md font-semibold">Waiting for mail</p>
+              <p class="text-md font-semibold">Waiting for mail</p>
             </div>
             <p class="mt-1.5 text-xs text-muted">
               Use this address anywhere. New mail shows up here by itself{m.live ? ", the moment it lands" : ""}.
@@ -185,7 +185,7 @@
   {:else if app.init}
     <div class="grid h-full place-items-center p-8 text-center">
       <div>
-        <p class="font-display text-lg font-semibold">Make your first address</p>
+        <p class="text-lg font-semibold tracking-title">Make your first address</p>
         <p class="mt-1 text-xs text-muted">A throwaway inbox that catches verification codes.</p>
         <button class="btn btn-primary mt-4" onclick={() => (app.newInboxOpen = true)}><Icon name="plus" size={14} />New inbox</button>
       </div>

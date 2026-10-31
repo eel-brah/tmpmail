@@ -15,7 +15,7 @@
 <nav class="flex h-full min-h-0 flex-col bg-panel" aria-label="Inboxes">
   <header class="flex items-center gap-2.5 px-4 pt-4 pb-3">
     <img src={logo} alt="" width="28" height="28" class="rounded-[7px]" />
-    <span class="font-display text-lg leading-none font-bold tracking-tight">tmpmail</span>
+    <span class="text-lg leading-none font-bold tracking-[-0.025em]">tmpmail</span>
   </header>
 
   <div class="px-3 pb-3">

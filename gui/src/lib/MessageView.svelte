@@ -36,12 +36,12 @@
   {#if m && app.init}
     <div class="max-h-[58%] shrink-0 overflow-y-auto border-b border-rule">
       <header class="px-6 pt-5 pb-3">
-        <h2 class="selectable font-display text-xl leading-tight font-semibold tracking-tight break-words">
+        <h2 class="selectable text-xl leading-tight font-semibold tracking-[-0.02em] break-words">
           {m.subject || "(no subject)"}
         </h2>
         <div class="mt-3 flex items-center gap-3">
           <span
-            class="grid h-9 w-9 shrink-0 place-items-center rounded-full bg-sunken font-display text-sm font-bold text-muted"
+            class="grid h-9 w-9 shrink-0 place-items-center rounded-full bg-sunken text-sm font-bold text-muted"
             aria-hidden="true">{senderName(m.from).trim().charAt(0).toUpperCase() || "?"}</span
           >
           <div class="min-w-0 flex-1">

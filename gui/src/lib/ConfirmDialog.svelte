@@ -33,11 +33,11 @@
       </span>
       <div class="min-w-0">
         {#if c.kind === "message"}
-          <h2 id="confirm-title" class="font-display text-md font-semibold">Delete this message?</h2>
+          <h2 id="confirm-title" class="text-md font-semibold">Delete this message?</h2>
           <p class="mt-1 truncate text-xs text-muted" title={c.subject}>{c.subject || "(no subject)"}</p>
           <p class="mt-2 text-xs text-muted">It's deleted at the provider too. This can't be undone.</p>
         {:else}
-          <h2 id="confirm-title" class="font-display text-md font-semibold">Delete this inbox?</h2>
+          <h2 id="confirm-title" class="text-md font-semibold">Delete this inbox?</h2>
           <p class="mt-1 truncate text-xs font-semibold" title={c.address}>{c.address}</p>
           <p class="mt-2 text-xs text-muted">
             {#if caps?.delete_inbox}

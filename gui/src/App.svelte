@@ -115,7 +115,7 @@
   <main class="grid h-full place-items-center p-8">
     <div class="max-w-md text-center">
       <img src={logo} alt="" width="48" height="48" class="mx-auto rounded-xl" />
-      <h1 class="mt-4 font-display text-lg font-semibold">tmpmail couldn't start</h1>
+      <h1 class="mt-4 text-lg font-semibold tracking-title">tmpmail couldn't start</h1>
       <p class="selectable mt-2 rounded-lg bg-danger-soft px-4 py-3 text-xs break-words text-danger">{app.startError}</p>
       <p class="mt-3 text-xs text-muted">
         Fix or move the file it names (the config is read from <code class="font-mono">TMPMAIL_CONFIG</code> or

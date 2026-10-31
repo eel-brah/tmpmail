@@ -1,5 +1,4 @@
 @import "tailwindcss";
-@import "@fontsource-variable/bricolage-grotesque/wght.css";
 
 /* Design tokens: "highlighter on graphite". Neutral grey surfaces so the
    one loud color, highlighter yellow, can mark what matters: the brand, the
@@ -31,8 +30,12 @@
   --color-frame: #ffffff;
 
   --font-sans: system-ui, -apple-system, "Segoe UI", "Cantarell", "Noto Sans", sans-serif;
-  --font-display: "Bricolage Grotesque Variable", var(--font-sans);
-  --font-mono: ui-monospace, "Cascadia Mono", "JetBrains Mono", Menlo, monospace;
+  --font-mono:
+    ui-monospace, "SF Mono", Menlo, "Cascadia Mono", Consolas, "JetBrains Mono", "DejaVu Sans Mono",
+    "Noto Sans Mono", "Liberation Mono", monospace;
+
+  /* Headings use the system font; 20px titles share one tracking. */
+  --tracking-title: -0.01em;
 
   /* Type scale (px): 12 / 13 / 14 / 16 / 20 / 26 / 40. */
   --text-2xs: 0.75rem;

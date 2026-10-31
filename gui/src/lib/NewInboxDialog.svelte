@@ -64,7 +64,7 @@
   <form class="flex max-h-[calc(100vh-2rem)] flex-col" onsubmit={submit}>
     <header class="flex items-start justify-between gap-4 px-6 pt-5">
       <div>
-        <h2 id="new-inbox-title" class="font-display text-lg font-semibold tracking-tight">New inbox</h2>
+        <h2 id="new-inbox-title" class="text-lg font-semibold tracking-title">New inbox</h2>
         <p class="mt-0.5 text-xs text-muted">Pick a provider, or let tmpmail use the first one that answers.</p>
       </div>
       <button type="button" class="btn btn-ghost btn-icon -mr-2" aria-label="Close" onclick={() => (app.newInboxOpen = false)}>

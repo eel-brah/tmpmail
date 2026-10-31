@@ -26,7 +26,7 @@
   <div class="min-w-0 flex-1 px-5 py-3.5">
     <p class="text-2xs font-semibold opacity-75">Verification code</p>
     <p
-      class="selectable mt-0.5 font-display text-code leading-none font-bold tracking-[0.06em] tabular-nums"
+      class="selectable mt-0.5 font-mono text-code leading-none font-bold tracking-[0.02em] slashed-zero"
       aria-label="Verification code {code.split('').join(' ')}"
     >
       {#each groups as g, i (i)}<span class={i > 0 ? "ml-[0.35em]" : ""}>{g}</span>{/each}

@@ -52,7 +52,7 @@
   onclose={() => (app.helpOpen = false)}
 >
   <header class="flex items-center justify-between px-6 pt-5">
-    <h2 id="help-title" class="font-display text-lg font-semibold tracking-tight">Keyboard shortcuts</h2>
+    <h2 id="help-title" class="text-lg font-semibold tracking-title">Keyboard shortcuts</h2>
     <button class="btn btn-ghost btn-icon -mr-2" aria-label="Close" onclick={() => (app.helpOpen = false)}>
       <Icon name="x" />
     </button>

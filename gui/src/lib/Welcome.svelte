@@ -9,7 +9,7 @@
 <section class="col-span-2 grid min-h-0 place-items-center overflow-y-auto border-l border-rule bg-raised p-10">
   <div class="w-full max-w-lg">
     <img src={logo} alt="" width="56" height="56" class="rounded-[14px]" />
-    <h1 class="mt-6 font-display text-[2.125rem] leading-[1.1] font-bold tracking-tight">
+    <h1 class="mt-6 text-[2rem] leading-[1.15] font-bold tracking-[-0.025em] text-balance">
       Throwaway addresses that catch your codes.
     </h1>
     <p class="mt-3 max-w-md text-sm text-muted">
