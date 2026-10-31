@@ -199,10 +199,17 @@ in `tauri.conf.json`:
   too); the `.rpm` requires the same libraries by their `.so` names
   (`libwebkit2gtk-4.1.so.0`, ...), so it isn't tied to Fedora's package names. The AppImage carries WebKitGTK and the tray library, without
   GStreamer (the app plays no media), and takes GTK, Wayland and GL from the system, as
-  AppImages do. The desktop file is `tmpmail.desktop` with
-  `StartupWMClass=tmpmail-gui`, which is the window's X11 class and its Wayland app ID
-  (GTK takes both from the binary's name, since `enableGTKAppId` is off), so docks show the
-  tmpmail icon.
+  AppImages do. The desktop file is `tmpmail.desktop` (from
+  `src-tauri/packaging/tmpmail.desktop`: Tauri's template with `StartupWMClass` set to the
+  product name, so `StartupWMClass=tmpmail`). The app sets its GTK
+  program name to `tmpmail` before GTK starts, so the window's X11 class (`tmpmail`,
+  `Tmpmail`) and its Wayland app ID are `tmpmail` too, not the binary's name `tmpmail-gui`.
+  That way KWin and Mutter match the window to the desktop file on X11 and Wayland, and
+  the title bar, task switcher and docks show the tmpmail icon (KWin on Wayland goes by the
+  app ID alone, and showed its generic "W" icon in 0.1.1). The window also carries its own
+  128×128 icon (`_NET_WM_ICON` on X11; Tauri takes the first PNG of `bundle.icon`, so
+  `128x128.png` comes first; 256×256 would be dropped by X servers without BIG-REQUESTS)
+  for window managers that don't read desktop files.
 - **License:** every package carries the GPL text as a bundle resource (`LICENSE` next to
   the app: `/usr/lib/tmpmail/LICENSE` on Linux and in the AppImage,
   `tmpmail.app/Contents/Resources/LICENSE`, the install directory on Windows). The `.deb`

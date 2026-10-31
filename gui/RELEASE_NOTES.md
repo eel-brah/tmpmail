@@ -6,6 +6,12 @@ built on the same core as the `tmpmail` command-line tool (0.3.2) and shares its
 has only been checked by the automated security probe. Please report what breaks:
 <https://github.com/qorvyx/tmpmail/issues>.
 
+## What's new in 0.1.2
+
+- **Linux: the window shows the tmpmail icon** in the title bar and the task switcher. KDE
+  on Wayland showed its generic "W" icon, since the window's app ID (`tmpmail-gui`)
+  matched no desktop file; it is now `tmpmail`, like the desktop file.
+
 ## What's new in 0.1.1
 
 - **Windows: clicking a notification opens the message**, also from the notification

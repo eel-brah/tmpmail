@@ -49,6 +49,9 @@ objc2-web-kit = { version = "0.3.2", default-features = false, features = ["std"
 # runs (both over D-Bus); already in the tree through the notification plugin.
 [target.'cfg(target_os = "linux")'.dependencies]
 notify-rust = "4.18.2"
+# The program name GTK gives the window's X11 class and Wayland app ID
+# (main.rs); already in the tree through tao and wry.
+gtk = "0.18.2"
 # Turning off the postMessage IPC route (caller.rs); already in the tree
 # through wry, on every OS below.
 webkit2gtk = "2.0.2"

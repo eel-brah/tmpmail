@@ -5077,6 +5077,7 @@ version = "0.1.1"
 dependencies = [
  "chrono",
  "drag",
+ "gtk",
  "notify-rust",
  "objc2-foundation",
  "objc2-web-kit",

@@ -36,6 +36,15 @@ use crate::worker::Req;
 /// The generated command handler, before the caller check wraps it.
 type Handler = Box<dyn Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + Sync>;
 
+/// The program name on Linux, and so the window's X11 class (`tmpmail`,
+/// `Tmpmail`) and Wayland app ID: the name of the desktop file the packages
+/// install (`<productName>.desktop`, with `StartupWMClass=<productName>`),
+/// so the desktop finds the app's icon and name for the window. GTK would
+/// take the binary's name, `tmpmail-gui`, which no desktop file has: KWin on
+/// Wayland then shows its generic icon. A test checks it is `productName`.
+#[cfg(target_os = "linux")]
+const PROGRAM: &str = "tmpmail";
+
 /// How many opened messages the scheme can still serve.
 const KEEP_MAILS: usize = 32;
 /// The window's size on a screen with room for it, and its minimum, in
@@ -231,6 +240,9 @@ fn popup(app: &tauri::AppHandle, shared: &Shared, url: &Url) {
 }
 
 fn main() {
+    // Before GTK starts, which would set it from the binary's name.
+    #[cfg(target_os = "linux")]
+    gtk::glib::set_prgname(Some(PROGRAM));
     #[cfg(debug_assertions)]
     let probe = probe::Probe::from_env();
     #[cfg(debug_assertions)]
@@ -481,6 +493,30 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn the_program_name_is_the_desktop_files() {
+        let conf: serde_json::Value =
+            serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
+        assert_eq!(conf["productName"], PROGRAM);
+        let linux = &conf["bundle"]["linux"];
+        for package in ["deb", "rpm"] {
+            assert_eq!(
+                linux[package]["desktopTemplate"],
+                "packaging/tmpmail.desktop"
+            );
+        }
+        let template = include_str!("../packaging/tmpmail.desktop");
+        assert!(template.lines().any(|l| l == "StartupWMClass={{name}}"));
+        // The window icon on Linux: Tauri takes the first PNG of the bundle.
+        let first_png = conf["bundle"]["icon"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|i| i.as_str().unwrap().ends_with(".png"));
+        assert_eq!(first_png.unwrap(), "icons/128x128.png");
+    }
 
     #[test]
     fn only_the_apps_own_pages_load() {
