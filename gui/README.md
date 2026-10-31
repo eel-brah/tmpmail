@@ -14,7 +14,7 @@ preview on `gui-v*` tags; install steps are in the [main README](../README.md#de
   Copy button or `c`), make it the active inbox (the CLI's default, marked with a star),
   check now, and delete it (asks first; deleted at the provider where it can be, then
   forgotten here). Each inbox shows its provider, expiry or lifetime, `Live` when a push
-  stream is up, and "Public" for Maildrop.
+  stream is up (it stays on through a quick reconnect), and "Public" for Maildrop.
 - **Live mail:** the same worker loop as the TUI (`tmpmail::watcher`: polling, push
   streams, state reloads so CLI changes show up within ~5 s). New mail is marked New, and a
   notice names the sender and subject with an Open button.

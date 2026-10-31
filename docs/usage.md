@@ -130,8 +130,11 @@ tmpmail wait -a --otp -t 600        # a code arriving at any of my inboxes
 over which the provider announces new mail (mail.tm's Mercure server-sent events, DropMail's
 `sessionMailReceived` subscription). New mail then shows up within a second or so, instead of
 at the next check. While the connection is up, the inbox is still checked once a minute in case
-something was missed. If the connection drops, tmpmail goes back to checking every
-`--interval` and reconnects with a growing delay. Turn push off with `push = false` in the
+something was missed. A mail.tm connection stays open for as long as the provider keeps it
+(75 s without even a keep-alive counts as dead), and is renewed every 30 minutes with the
+inbox's current token. If a connection that had been up for a minute or more drops, tmpmail reconnects within a few seconds and the inbox still counts as live meanwhile;
+if connections keep failing, it goes back to checking every `--interval` and reconnects with a
+growing delay. Turn push off with `push = false` in the
 config or `TMPMAIL_PUSH=0`.
 
 ### `otp`: extract a verification code

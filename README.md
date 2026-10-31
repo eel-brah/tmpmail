@@ -269,7 +269,8 @@ there. `--from`, `--subject` and `--body` narrow it down, and plain words work.
 
 With mail.tm and DropMail, tmpmail keeps a connection open and the provider announces new
 mail the moment it lands, so `wait`, `watch` and the TUI react in about a second. Other
-providers are checked every 5 seconds. The TUI shows `● live` while the connection is up.
+providers are checked every 5 seconds. The TUI shows `● live` while the connection is up,
+and through a quick reconnect.
 Nothing to set up; turn it off with `TMPMAIL_PUSH=0` or `push = false` in the config.
 
 ### Attachments

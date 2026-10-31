@@ -20,6 +20,9 @@ const MAX_PAGES: usize = 5;
 /// The Mercure hub sends a comment line every 30 s; this much silence means
 /// the connection is dead.
 const MERCURE_IDLE: Duration = Duration::from_secs(75);
+/// A stream ends itself after this long, so the poller reconnects it with
+/// the inbox's current token (the hub checks it only when a stream starts).
+const MERCURE_MAX_AGE: Duration = Duration::from_secs(30 * 60);
 
 pub struct MailTm {
     id: &'static str,
@@ -365,19 +368,20 @@ struct Mercure {
 
 impl PushStream for Mercure {
     fn run(self: Box<Self>, event: &mut dyn FnMut(PushEvent) -> bool) -> Result<()> {
+        // No `.timeout()` on the request: that would end the stream after
+        // MERCURE_IDLE however busy it was. The client's bounds each read.
+        let client = self.http.stream_client(MERCURE_IDLE);
         let resp = self.http.send(|| {
-            self.http
-                .client()
+            client
                 .get(&self.url)
                 .query(&[("topic", &self.topic)])
                 .header("Accept", "text/event-stream")
                 .bearer_auth(&self.token)
-                // For a stream this bounds each read, not the whole response.
-                .timeout(MERCURE_IDLE)
         })?;
         if !event(PushEvent::Connected) {
             return Ok(());
         }
+        let started = std::time::Instant::now();
         for line in BufReader::new(resp).lines() {
             let line = line.map_err(|e| Error::Unreachable {
                 provider: "mailtm".into(),
@@ -388,7 +392,7 @@ impl PushStream for Mercure {
             } else {
                 PushEvent::Alive
             };
-            if !event(kind) {
+            if !event(kind) || started.elapsed() >= MERCURE_MAX_AGE {
                 return Ok(());
             }
         }

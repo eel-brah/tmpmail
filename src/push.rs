@@ -18,6 +18,10 @@ const SAFETY_POLL: Duration = Duration::from_secs(60);
 const MAX_BACKOFF: Duration = Duration::from_secs(300);
 /// A stream that stayed up this long counts as healthy when it closes.
 const STABLE: Duration = Duration::from_secs(60);
+/// A healthy stream that closes is reconnected after the first backoff step
+/// (4 s), and its inbox is still reported live for this long, so a stream
+/// the hub (or tmpmail, for a fresh token) ends doesn't make "live" blink.
+const RECONNECT_GRACE: Duration = Duration::from_secs(30);
 
 pub struct Poller {
     interval: Duration,
@@ -37,6 +41,9 @@ struct Stream {
     id: u64,
     running: bool,
     live: bool,
+    /// Until when a healthy stream that closed still counts as live while
+    /// it reconnects.
+    grace_until: Option<Instant>,
     started: Instant,
     failures: u32,
     retry_at: Instant,
@@ -82,7 +89,13 @@ impl Poller {
     /// in case the provider announced the mail before it could be listed.
     pub fn polled(&mut self, address: &str, ok: bool) {
         let woken = self.woken.remove(address);
-        let wait = if ok && !woken && self.is_live(address) {
+        if !ok {
+            // Not live while the provider fails, reconnecting or not.
+            if let Some(s) = self.streams.get_mut(address) {
+                s.grace_until = None;
+            }
+        }
+        let wait = if ok && !woken && self.is_connected(address) {
             SAFETY_POLL
         } else {
             self.interval + Duration::from_millis(rand::random_range(0..1000))
@@ -90,7 +103,16 @@ impl Poller {
         self.due.insert(address.to_string(), Instant::now() + wait);
     }
 
+    /// Whether `address`'s push stream is up, or reconnecting after a
+    /// healthy one closed (for a short while).
     pub fn is_live(&self, address: &str) -> bool {
+        self.streams
+            .get(address)
+            .is_some_and(|s| s.live || s.grace_until.is_some_and(|t| Instant::now() < t))
+    }
+
+    /// Whether `address`'s push stream is connected right now.
+    fn is_connected(&self, address: &str) -> bool {
         self.streams.get(address).is_some_and(|s| s.live)
     }
 
@@ -103,10 +125,10 @@ impl Poller {
             return;
         }
         let now = Instant::now();
-        let failures = match self.streams.get(&inbox.address) {
+        let (failures, grace_until) = match self.streams.get(&inbox.address) {
             Some(s) if s.unsupported || s.running || now < s.retry_at => return,
-            Some(s) => s.failures,
-            None => 0,
+            Some(s) => (s.failures, s.grace_until),
+            None => (0, None),
         };
         let stop = Arc::new(AtomicBool::new(false));
         let Some(stream) = p.push(inbox) else {
@@ -116,6 +138,7 @@ impl Poller {
                     id: 0,
                     running: false,
                     live: false,
+                    grace_until: None,
                     started: now,
                     failures,
                     retry_at: now,
@@ -153,6 +176,7 @@ impl Poller {
                 id,
                 running: true,
                 live: false,
+                grace_until,
                 started: now,
                 failures,
                 retry_at: now,
@@ -212,6 +236,8 @@ impl Poller {
         let now = Instant::now();
         match signal.kind {
             Kind::Connected => {
+                // A grace still running stays: it covers this stream
+                // failing quickly too, and runs out on its own.
                 s.live = true;
                 s.started = now;
             }
@@ -224,8 +250,18 @@ impl Poller {
                 s.running = false;
                 s.live = false;
                 s.retry_at = now + backoff(s.failures);
-                // Back to normal polling until a stream is up again.
-                let soon = now + self.interval;
+                // A healthy stream is reconnected at the next listing, as
+                // soon as the backoff allows, and stays "live" meanwhile
+                // (through quick failures too, until the grace runs out).
+                // Otherwise: back to normal polling until one is up again.
+                if stable {
+                    s.grace_until = Some(now + RECONNECT_GRACE);
+                }
+                let soon = if stable {
+                    s.retry_at
+                } else {
+                    now + self.interval
+                };
                 self.due
                     .entry(signal.address)
                     .and_modify(|t| *t = (*t).min(soon));
@@ -335,6 +371,86 @@ mod tests {
         assert!(retry_at > Instant::now());
         poller.subscribe(&Fake { mails: 0 }, &inbox);
         assert_eq!(poller.streams[&inbox.address].retry_at, retry_at);
+    }
+
+    /// Puts a running stream with id 7 in place for a@x.com.
+    fn running(poller: &mut Poller) {
+        let now = Instant::now();
+        poller.streams.insert(
+            "a@x.com".into(),
+            Stream {
+                id: 7,
+                running: true,
+                live: false,
+                grace_until: None,
+                started: now,
+                failures: 0,
+                retry_at: now,
+                unsupported: false,
+                stop: Arc::new(AtomicBool::new(false)),
+            },
+        );
+    }
+
+    fn signal(poller: &mut Poller, kind: Kind) {
+        poller.handle(Signal {
+            address: "a@x.com".into(),
+            id: 7,
+            kind,
+        });
+    }
+
+    #[test]
+    fn a_healthy_stream_that_closes_stays_live_while_it_reconnects() {
+        let mut poller = Poller::new(Duration::from_secs(5), true);
+        poller.polled("a@x.com", true);
+        running(&mut poller);
+        signal(&mut poller, Kind::Connected);
+        assert!(poller.is_live("a@x.com"));
+        poller.streams.get_mut("a@x.com").unwrap().started = Instant::now() - STABLE;
+        signal(&mut poller, Kind::Closed);
+
+        let s = &poller.streams["a@x.com"];
+        assert!(!s.live && !s.running);
+        assert!(poller.is_live("a@x.com"), "still live during the grace");
+        assert!(!poller.is_connected("a@x.com"));
+        // Listed (and so reconnected) when the backoff ends, not later.
+        assert_eq!(poller.due["a@x.com"], s.retry_at);
+        assert!(s.retry_at <= Instant::now() + backoff(1));
+
+        // A quick failure of the reconnect keeps the grace.
+        let retry_at = Instant::now();
+        let s = poller.streams.get_mut("a@x.com").unwrap();
+        (s.running, s.retry_at) = (true, retry_at);
+        signal(&mut poller, Kind::Connected);
+        signal(&mut poller, Kind::Closed);
+        assert!(poller.is_live("a@x.com"));
+
+        // The grace runs out if no stream connects.
+        poller.streams.get_mut("a@x.com").unwrap().grace_until = Some(Instant::now());
+        assert!(!poller.is_live("a@x.com"));
+    }
+
+    #[test]
+    fn a_failed_listing_ends_the_grace() {
+        let mut poller = Poller::new(Duration::from_secs(5), true);
+        running(&mut poller);
+        signal(&mut poller, Kind::Connected);
+        poller.streams.get_mut("a@x.com").unwrap().started = Instant::now() - STABLE;
+        signal(&mut poller, Kind::Closed);
+        assert!(poller.is_live("a@x.com"));
+        poller.polled("a@x.com", false);
+        assert!(!poller.is_live("a@x.com"));
+    }
+
+    #[test]
+    fn a_stream_that_fails_quickly_is_not_live() {
+        let mut poller = Poller::new(Duration::from_secs(5), true);
+        running(&mut poller);
+        signal(&mut poller, Kind::Connected);
+        signal(&mut poller, Kind::Closed);
+        assert!(!poller.is_live("a@x.com"));
+        assert_eq!(poller.streams["a@x.com"].grace_until, None);
     }
 
     #[test]

@@ -34,24 +34,39 @@ fn timeout_secs(env: Option<&str>, configured: u64) -> u64 {
 /// instead of paying a TLS handshake per request. It is built again only if
 /// the timeout changes (the desktop app's settings).
 fn shared_client() -> Client {
-    static CLIENT: Mutex<Option<(u64, Client)>> = Mutex::new(None);
+    static CLIENT: Mutex<Option<(Duration, Client)>> = Mutex::new(None);
     let env = std::env::var("TMPMAIL_HTTP_TIMEOUT").ok();
     let secs = timeout_secs(env.as_deref(), CONFIGURED_TIMEOUT.load(Ordering::Relaxed));
-    let mut client = CLIENT.lock().unwrap_or_else(PoisonError::into_inner);
+    cached(&CLIENT, Duration::from_secs(secs))
+}
+
+/// The client in `cache`, built again when `timeout` differs from the one
+/// it was built with. Every client has the same settings but the timeout.
+fn cached(cache: &Mutex<Option<(Duration, Client)>>, timeout: Duration) -> Client {
+    let mut client = cache.lock().unwrap_or_else(PoisonError::into_inner);
     match &*client {
-        Some((s, c)) if *s == secs => c.clone(),
+        Some((t, c)) if *t == timeout => c.clone(),
         _ => {
             let c = Client::builder()
                 .user_agent(USER_AGENT)
-                .timeout(Duration::from_secs(secs))
+                .timeout(timeout)
                 .connect_timeout(Duration::from_secs(10))
                 .https_only(!cfg!(test) && std::env::var_os("TMPMAIL_ALLOW_HTTP").is_none())
                 .build()
                 .expect("HTTP client configuration is valid");
-            *client = Some((secs, c.clone()));
+            *client = Some((timeout, c.clone()));
             c
         }
     }
+}
+
+/// A client for responses the server keeps open (mail.tm's push stream).
+/// Its timeout bounds each read, not the whole response: a request's own
+/// `timeout` would end the stream that long after it started, however busy
+/// it was.
+fn stream_client(idle: Duration) -> Client {
+    static CLIENT: Mutex<Option<(Duration, Client)>> = Mutex::new(None);
+    cached(&CLIENT, idle)
 }
 
 /// Thin wrapper around a blocking client that turns every failure into a typed
@@ -69,6 +84,12 @@ impl Http {
     /// The shared client (a cheap handle to the same connection pool).
     pub fn client(&self) -> Client {
         shared_client()
+    }
+
+    /// A client for a stream that may stay open for hours, with no read
+    /// taking longer than `idle` (see [`stream_client`]).
+    pub fn stream_client(&self, idle: Duration) -> Client {
+        stream_client(idle)
     }
 
     /// Sends a request, retrying on 429 (honouring Retry-After) and mapping
@@ -240,6 +261,52 @@ fn snippet(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{BufRead, BufReader, Write};
+
+    /// A server that answers one request with a line every 250 ms for
+    /// `lines` lines. Returns its URL.
+    fn trickle(lines: usize) -> String {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/", listener.local_addr().unwrap());
+        std::thread::spawn(move || {
+            let (mut conn, _) = listener.accept().unwrap();
+            let mut req = BufReader::new(conn.try_clone().unwrap());
+            let mut line = String::new();
+            while req.read_line(&mut line).is_ok_and(|n| n > 2) {
+                line.clear();
+            }
+            let _ = conn.write_all(
+                b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\n\r\n",
+            );
+            for _ in 0..lines {
+                if conn.write_all(b":\n").and_then(|()| conn.flush()).is_err() {
+                    return;
+                }
+                sleep(Duration::from_millis(250));
+            }
+        });
+        url
+    }
+
+    #[test]
+    fn a_stream_outlives_its_idle_bound_while_data_flows() {
+        // A client of its own, so the process-wide stream client stays as
+        // it is for other tests.
+        let idle = Duration::from_secs(1);
+        let cache = Mutex::new(None);
+        let resp = cached(&cache, idle).get(trickle(12)).send().unwrap();
+        // 12 lines over ~3 s, three times the idle bound.
+        assert_eq!(BufReader::new(resp).lines().map(Result::unwrap).count(), 12);
+
+        // A request's own timeout cuts the same stream off (what mail.tm's
+        // push stream did every 75 s).
+        let resp = cached(&cache, idle)
+            .get(trickle(12))
+            .timeout(idle)
+            .send()
+            .unwrap();
+        assert!(BufReader::new(resp).lines().any(|l| l.is_err()));
+    }
 
     #[test]
     fn the_environment_wins_over_the_config_timeout() {
