@@ -423,7 +423,7 @@ These still work when used as the **first** argument, so old scripts keep runnin
 | `TMPMAIL_POLL_INTERVAL` | Seconds between checks in `wait`/`watch`. |
 | `TMPMAIL_PASSWORD` | Password for `new --password` / `login`. Keeps it out of your shell history. |
 | `TMPMAIL_STATE_DIR` | Where inboxes are stored. Default `~/.local/state/tmpmail`. |
-| `TMPMAIL_CONFIG` | Config file path. Default `~/.config/tmpmail/config.toml`. |
+| `TMPMAIL_CONFIG` | Config file path. Default `~/.config/tmpmail/config.toml`. Unknown keys in it are ignored with a warning on stderr (not with `-q` or `--json`; 0.2.0 refused them); a known key with a bad value is an error. |
 | `TMPMAIL_DROPMAIL_TOKEN` | Your own DropMail API token, if DropMail asks for a captcha. |
 | `TMPMAIL_PUSH` | `0` turns off push in `wait`/`watch` (see [`wait`](#wait-wait-for-a-message)). Default `1`. |
 | `PAGER` | Pager for long messages in `read`, unless `pager` is set in the config. Default `less` (on Windows, printing directly when `less` isn't installed). |

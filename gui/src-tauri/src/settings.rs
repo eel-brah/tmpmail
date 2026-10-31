@@ -2,11 +2,10 @@
 //! poll interval, push, request timeout) live in the CLI's `config.toml`,
 //! edited with `toml_edit` so the user's comments and other keys stay as they
 //! were. The desktop-only ones (notifications, tray, start minimized) live in
-//! `gui.json` next to it: the CLI's config rejects unknown keys
-//! (`deny_unknown_fields`), so a `[gui]` table would make every CLI, the
-//! released 0.2.0 included, refuse to start. `http_timeout` is a CLI key
-//! new after 0.2.0: it is only written once the timeout is changed from its
-//! default, and the screen warns that older CLIs reject it.
+//! `gui.json` next to it: the released CLI 0.2.0 refuses unknown keys, so a
+//! `[gui]` table would stop it from starting (0.2.1 and later only warn).
+//! `http_timeout` is a CLI key new after 0.2.0: it is only written once the
+//! timeout is changed from its default, and the screen says 0.2.0 refuses it.
 
 use std::path::{Path, PathBuf};
 

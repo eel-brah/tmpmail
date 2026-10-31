@@ -1,9 +1,11 @@
 //! Optional config file plus environment overrides, for interactive use and CI.
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use anyhow::Context;
 use serde::Deserialize;
+use serde::de::IgnoredAny;
 
 use crate::error::{Error, Result};
 use crate::provider;
@@ -13,8 +15,11 @@ pub const DEFAULT_POLL_INTERVAL: u64 = 5;
 /// Seconds before a request gives up when nothing sets it.
 pub const DEFAULT_HTTP_TIMEOUT: u64 = 20;
 
+/// Known keys are checked strictly (type and value); unknown ones are kept
+/// aside and reported as warnings, so a newer key (or a typo) never stops an
+/// older tmpmail from starting.
 #[derive(Debug, Default, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[serde(default)]
 pub struct Config {
     /// Provider ids tried in order by `new`.
     pub providers: Option<Vec<String>>,
@@ -31,6 +36,12 @@ pub struct Config {
     /// Seconds before a single request to a provider gives up (default 20;
     /// `TMPMAIL_HTTP_TIMEOUT` wins over it).
     pub http_timeout: Option<u64>,
+    /// Top-level keys this version doesn't know (names only), ignored.
+    #[serde(flatten)]
+    unknown: BTreeMap<String, IgnoredAny>,
+    /// The file this was read from, for the warnings.
+    #[serde(skip)]
+    source: Option<PathBuf>,
 }
 
 impl Config {
@@ -45,7 +56,10 @@ impl Config {
         let mut cfg = match Self::path() {
             Some(path) => match std::fs::read_to_string(&path) {
                 Ok(s) => {
-                    Self::parse(&s).with_context(|| format!("invalid config {}", path.display()))?
+                    let mut cfg = Self::parse(&s)
+                        .with_context(|| format!("invalid config {}", path.display()))?;
+                    cfg.source = Some(path);
+                    cfg
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => Config::default(),
                 Err(e) => {
@@ -87,6 +101,20 @@ impl Config {
             ));
         }
         Ok(cfg)
+    }
+
+    /// One warning per top-level key this version doesn't know (and
+    /// ignores), in order, for the front ends to show.
+    pub fn warnings(&self) -> Vec<String> {
+        let file = self
+            .source
+            .as_ref()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "the config".into());
+        self.unknown
+            .keys()
+            .map(|k| format!("unknown key {k:?} in {file}, ignored"))
+            .collect()
     }
 
     /// Reads a config file's text, without the environment overrides.
@@ -135,7 +163,53 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_every_key_and_rejects_unknown_ones() {
+    fn unknown_keys_load_with_a_warning() {
+        let cfg =
+            Config::parse("poll_interval = 7\nhttp_timeuot = 3\n[gui]\ntray = true\n").unwrap();
+        assert_eq!(cfg.poll_interval(None), 7);
+        assert_eq!(
+            cfg.warnings(),
+            [
+                "unknown key \"gui\" in the config, ignored",
+                "unknown key \"http_timeuot\" in the config, ignored"
+            ]
+        );
+        assert!(
+            Config::parse("push = true\n")
+                .unwrap()
+                .warnings()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn known_keys_stay_strict() {
+        for bad in [
+            "poll_interval = \"5\"",
+            "poll_interval = -1",
+            "push = 1",
+            "providers = \"mailtm\"",
+            "providers = [1]",
+            "http_timeout = 2.5",
+            "browser = false",
+        ] {
+            assert!(Config::parse(bad).is_err(), "{bad}");
+        }
+        let err = Config::parse("http_timeout = \"x\"\nfoo = 1\n").unwrap_err();
+        assert!(err.to_string().contains("line 1"), "{err}");
+    }
+
+    #[test]
+    fn http_timeout_round_trips() {
+        let cfg = Config::parse("http_timeout = 45\n").unwrap();
+        assert_eq!(cfg.http_timeout, Some(45));
+        assert!(cfg.warnings().is_empty());
+        let text = format!("http_timeout = {}\n", cfg.http_timeout.unwrap());
+        assert_eq!(Config::parse(&text).unwrap().http_timeout, Some(45));
+    }
+
+    #[test]
+    fn parses_every_key() {
         let cfg = Config::parse(
             "providers = [\"mailtm\"]\npoll_interval = 7\npush = false\nhttp_timeout = 30\n",
         )
@@ -144,7 +218,6 @@ mod tests {
         assert_eq!(cfg.poll_interval(None), 7);
         assert!(!cfg.push());
         assert_eq!(cfg.http_timeout, Some(30));
-        assert!(Config::parse("[gui]\ntray = true\n").is_err());
         let empty = Config::parse("").unwrap();
         assert_eq!(empty.http_timeout, None);
         assert_eq!(empty.poll_interval(None), 5);

@@ -97,7 +97,7 @@ impl App {
             && !global.json
             && std::env::var_os("NO_COLOR").is_none()
             && std::io::stdout().is_terminal();
-        Ok(App {
+        let app = App {
             global,
             config,
             store,
@@ -107,7 +107,17 @@ impl App {
             log: None,
             #[cfg(feature = "cli")]
             cancel: None,
-        })
+        };
+        // A key from a newer tmpmail (or a typo) is reported, not fatal:
+        // once per process on stderr (the MCP server builds an App per
+        // call), and again in a front end's log once it has one.
+        static WARNED: std::sync::Once = std::sync::Once::new();
+        WARNED.call_once(|| {
+            for w in app.config.warnings() {
+                app.note(&format!("tmpmail: {w}"));
+            }
+        });
+        Ok(app)
     }
 
     /// An app with the default config and an empty state kept in `dir`,
@@ -135,6 +145,9 @@ impl App {
 
     /// Sends notes and warnings to `log` instead of printing them.
     pub fn log_to(&mut self, log: Sender<String>) {
+        for w in self.config.warnings() {
+            let _ = log.send(clean_line(&w));
+        }
         self.log = Some(log);
     }
 
@@ -199,7 +212,7 @@ impl App {
     }
 
     /// Messages can quote provider responses, so they are cleaned like mail.
-    fn note(&self, msg: &str) {
+    pub(crate) fn note(&self, msg: &str) {
         if let Some(log) = &self.log {
             let _ = log.send(clean_line(msg));
         } else if !self.global.quiet && !self.global.json {

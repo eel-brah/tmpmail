@@ -212,7 +212,7 @@
                   <span class="text-xs text-muted">seconds</span>
                 </span>
                 {#if httpTimeout !== 20}
-                  <p class="mt-1 text-2xs text-muted">Saved as <code class="font-mono">http_timeout</code>, which tmpmail 0.2.0 and older don't read: they refuse the config.</p>
+                  <p class="mt-1 text-2xs text-muted">Saved as <code class="font-mono">http_timeout</code>, which tmpmail 0.2.0 doesn't know: it refuses unknown keys (0.2.1 and later warn).</p>
                 {/if}
                 {@render envNote("TMPMAIL_HTTP_TIMEOUT")}
               </label>

@@ -91,6 +91,9 @@ impl Watcher {
     /// streams end, and every inbox is listed again on the next turn.
     pub fn set_config(&mut self, config: Config) {
         crate::http::set_timeout(config.http_timeout);
+        for w in config.warnings() {
+            self.app.note(&w);
+        }
         self.poller = Self::poller(&config);
         self.app.config = config;
     }
