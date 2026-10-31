@@ -20,16 +20,28 @@
   const groups = $derived(
     /^\d{6,8}$/.test(code) ? (code.match(/\d{1,3}(?=(\d{3})*$)/g) ?? [code]) : code.split(/[ -]/),
   );
+
+  // Shrinks a long code to fit its box (a monospace character is about
+  // 0.62em wide, a group gap 0.35em); past the smallest size it wraps
+  // instead of being cut.
+  const fit = $derived((code.length * 0.62 + Math.max(0, groups.length - 1) * 0.35).toFixed(2));
 </script>
 
+<div class="ticket-wrap">
 <div class="ticket relative flex items-stretch overflow-hidden rounded-xl bg-hi text-hi-ink">
-  <div class="min-w-0 flex-1 px-5 py-3.5">
-    <p class="text-2xs font-semibold opacity-75">Verification code</p>
+  <div class="code-box min-w-0 flex-1 px-5 py-3.5">
+    <p class="text-2xs font-semibold opacity-75" aria-hidden="true">Verification code</p>
+    <!-- Read out digit by digit; outside the selectable text, so copying the
+         code by hand copies only the code. -->
+    <p class="sr-only">Verification code: {code.split("").join(" ")}</p>
     <p
-      class="selectable mt-0.5 font-mono text-code leading-none font-bold tracking-[0.02em] slashed-zero"
-      aria-label="Verification code {code.split('').join(' ')}"
+      class="selectable mt-0.5 font-mono leading-none font-bold tracking-[0.02em] [overflow-wrap:anywhere] slashed-zero"
+      style:font-size="clamp(1.25rem, calc(100cqi / {fit}), var(--text-code))"
+      aria-hidden="true"
     >
-      {#each groups as g, i (i)}<span class={i > 0 ? "ml-[0.35em]" : ""}>{g}</span>{/each}
+      <span class="inline-flex flex-wrap gap-x-[0.35em] gap-y-1">
+        {#each groups as g, i (i)}<span>{g}</span>{/each}
+      </span>
     </p>
   </div>
   <div class="stub relative flex shrink-0 items-center px-4">
@@ -51,7 +63,37 @@
   </div>
 </div>
 
+</div>
+
 <style>
+  .ticket-wrap {
+    container-type: inline-size;
+  }
+  .code-box {
+    container-type: inline-size;
+  }
+  /* A narrow pane: the stub goes under the code, torn off along the top.
+     (Nested selectors: the build moves this block before the rules above.) */
+  @container (max-width: 22rem) {
+    .ticket-wrap .ticket {
+      flex-direction: column;
+    }
+    .ticket-wrap .stub {
+      border-left: 0;
+      border-top: 2px dashed color-mix(in srgb, var(--color-hi-ink) 30%, transparent);
+      padding-block: 10px;
+    }
+    .ticket-wrap .stub::before {
+      top: -9px;
+      left: -8px;
+    }
+    .ticket-wrap .stub::after {
+      top: -9px;
+      bottom: auto;
+      left: auto;
+      right: -8px;
+    }
+  }
   /* The perforation between the code and its stub, with a notch at each
      end cut in the page's color. */
   .stub {
