@@ -8,6 +8,7 @@
   import NewInboxDialog from "./lib/NewInboxDialog.svelte";
   import ProbeView from "./lib/ProbeView.svelte";
   import Resizer from "./lib/Resizer.svelte";
+  import SettingsDialog from "./lib/SettingsDialog.svelte";
   import Sidebar from "./lib/Sidebar.svelte";
   import Toasts from "./lib/Toasts.svelte";
   import Welcome from "./lib/Welcome.svelte";
@@ -40,6 +41,12 @@
 
   /** The TUI's keys. Off while typing in a field or while a dialog is open. */
   function onkey(e: KeyboardEvent) {
+    // Ctrl+, (Cmd+, on macOS) opens the settings, from anywhere.
+    if (e.key === "," && (e.ctrlKey || e.metaKey) && !e.altKey && app.init && !app.init.probe) {
+      e.preventDefault();
+      if (!document.querySelector("dialog[open]")) app.settingsOpen = true;
+      return;
+    }
     if (e.ctrlKey || e.metaKey || e.altKey || e.defaultPrevented) return;
     const t = e.target as HTMLElement | null;
     if (t?.closest("input, textarea, select, [contenteditable]")) return;
@@ -144,6 +151,7 @@
   <NewInboxDialog />
   <ConfirmDialog />
   <HelpDialog />
+  <SettingsDialog />
 {/if}
 
 <Toasts />

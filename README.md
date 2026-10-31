@@ -124,9 +124,12 @@ are listed under Reference.
 A desktop app for people who'd rather not live in a terminal is being built in
 [`gui/`](gui/README.md), on the same inboxes as the CLI. It shows your inboxes and their
 mail live, puts the verification code in a big banner with a Copy button, lists the
-verification link first, previews HTML mail safely (light or dark), saves attachments, and
-creates and deletes inboxes and messages, with the TUI's keyboard shortcuts. It isn't
-released yet: run it from source with Rust 1.90+, Node 24 and pnpm:
+verification link first, previews HTML mail safely (light or dark), saves attachments (or
+drags them out on Linux and macOS), and creates and deletes inboxes and messages, with the
+TUI's keyboard shortcuts. It notifies you of new mail (with the code, if there is one) while
+it's in the background, can sit in the tray and keep checking with the window closed, and
+has a settings screen for the provider order, checking and the desktop options, written to
+the same `config.toml` as the CLI's. It isn't released yet: run it from source with Rust 1.90+, Node 24 and pnpm:
 
 ```sh
 cd gui && pnpm install && pnpm tauri dev

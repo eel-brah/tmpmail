@@ -39,6 +39,7 @@
       title: "App",
       keys: [
         [["?"], "Show these shortcuts"],
+        [[/Mac/.test(navigator.platform) ? "⌘ ," : "Ctrl ,"], "Settings"],
         [["Esc"], "Close a dialog"],
       ],
     },

@@ -151,8 +151,29 @@
           <h3 class="mb-1.5 text-2xs font-semibold text-muted">Attachments</h3>
           <ul class="flex flex-wrap gap-2">
             {#each m.attachments as a, i (i)}
+              {@const ready = app.dragReady[`${m.key}/${i}`]}
               <li class="flex max-w-full items-center gap-2.5 rounded-lg border border-rule py-1.5 pr-1.5 pl-3">
-                <Icon name="paperclip" size={14} class="text-faint" />
+                {#if app.init.drag}
+                  <!-- Dragging this starts a drag of the file itself; Rust
+                       downloads it first, when the pointer gets here. -->
+                  <span
+                    class={["-ml-1.5 grid h-7 w-5 place-items-center rounded text-faint", ready ? "cursor-grab hover:bg-hover hover:text-ink" : "cursor-progress"]}
+                    draggable="true"
+                    role="img"
+                    aria-label="Drag {a.filename} out"
+                    title={ready ? "Drag the file to a folder or another app" : ready === false ? "Getting the file ready to drag…" : "Drag the file out"}
+                    onpointerenter={() => app.prepareDrag(i)}
+                    ondragstart={(e) => {
+                      e.preventDefault();
+                      if (ready) app.dragOut(i);
+                      else app.prepareDrag(i);
+                    }}
+                  >
+                    <Icon name="grip" size={14} />
+                  </span>
+                {:else}
+                  <Icon name="paperclip" size={14} class="text-faint" />
+                {/if}
                 <span class="min-w-0">
                   <span class="block max-w-[16rem] truncate text-xs font-semibold" title={a.filename}>{a.filename}</span>
                   <span class="block text-2xs text-muted">{fileKind(a.content_type, a.filename)}{a.size != null ? `, ${fileSize(a.size)}` : ""}</span>

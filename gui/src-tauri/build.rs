@@ -14,6 +14,11 @@ fn main() {
         "copy_from_message",
         "open_link",
         "save_attachment",
+        "settings",
+        "save_settings",
+        "reveal_config",
+        "prepare_attachment",
+        "drag_attachment",
         "probe_finish",
     ]);
     tauri_build::try_build(tauri_build::Attributes::new().app_manifest(manifest))

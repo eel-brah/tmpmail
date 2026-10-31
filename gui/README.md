@@ -28,7 +28,41 @@ a safe HTML preview in light or dark, and the TUI's actions and keys. Not releas
   - Load images (remote images, over **https only**), Original colors in dark mode, and
     Source (the raw message where the provider has it, else the HTML).
   - Attachments with name, type and size, and Save (a native save dialog; never overwrites
-    an existing file).
+    an existing file). On Linux and macOS an attachment can also be dragged out by its grip
+    to a folder or another app (see "Dragging attachments out").
+- **Notifications:** new mail while the window isn't focused (or is hidden in the tray)
+  shows a system notification with the sender and subject, and the code when the subject or
+  preview has one ("Code 482913 from GitHub"). Mail arriving within 2 s is grouped into one
+  notification ("Code 482913 from GitHub, and 2 more", or "3 new messages"). Clicking it
+  brings the window back and opens the message (the one with a code, else the newest).
+  Sender and subject are cleaned of control and bidi characters, capped (48 and 100
+  characters) and, on Linux servers that read markup, escaped. The first listing of an
+  inbox never notifies. Turned off in the settings. Permissions: Linux and Windows ask for
+  none; on macOS the system decides whether to ask when the first one is shown (not tested
+  yet; System Settings → Notifications turns them on or off), and debug builds started with
+  `tauri dev` post as Terminal. Clicks are reported on Linux (servers with the `default` action, e.g.
+  KDE, GNOME), on macOS, and on Windows only while the toast is on screen, not from the
+  Action Center; Windows shows the app's name only for the installed app.
+- **Tray icon (opt-in):** turned on in the settings. Its menu has Show tmpmail, New address
+  (the first provider that works; the address is copied and a notification says so), Copy
+  code (the newest code of the last 15 minutes, across inboxes; greyed out otherwise) and
+  Quit. While it is on, closing the window hides it and mail is still checked; "Start
+  hidden in the tray" skips the window at launch. Linux reports no clicks on the icon
+  itself, so everything is in the menu (on Windows a click shows the window). Linux needs a
+  StatusNotifier host: KDE and most desktops have one, **stock GNOME needs the AppIndicator
+  extension**. Without a host the settings say so and closing the window still quits, so
+  the app can't vanish. macOS gets a monochrome template icon.
+- **Settings** (gear in the sidebar footer, or `Ctrl+,` / `Cmd+,`): theme, provider order
+  (turn providers on and off, move them up and down; the fallback order is spelled out),
+  poll interval (2–3600 s), live push, request timeout (1–600 s), notifications, tray and
+  start hidden. Rust checks every field again (known providers, no duplicates, at least
+  one on, the bounds). Saved settings apply at once: the worker gets a new poll interval,
+  push setting and timeout without a restart, and the tray appears or goes. Environment
+  variables that win over a field (`TMPMAIL_PROVIDER`, `TMPMAIL_POLL_INTERVAL`,
+  `TMPMAIL_PUSH`, `TMPMAIL_HTTP_TIMEOUT`) are named under it. "Show in folder" reveals the
+  config file. Saving only restarts polling (and the push streams) when `config.toml`
+  changed. `http_timeout` is new after the CLI's 0.2.0, which rejects it: it is written only
+  once the timeout is changed from 20 s, and the screen says so.
 - **Look:** System / Light / Dark switch (remembered), resizable panes (remembered),
   keyboard focus rings, motion only on arrival of mail and dialogs, none with
   `prefers-reduced-motion`.
@@ -58,6 +92,33 @@ shows them in the app.
 | `d` / `D` | Delete the message / the inbox (asks first) |
 | `/` | Filter messages |
 | `?` | Shortcut help |
+| `Ctrl+,` / `Cmd+,` | Settings |
+
+## Where settings are kept
+
+- The provider order (`providers`), `poll_interval`, `push` and `http_timeout` are the CLI's
+  own keys, in the same `config.toml` (`~/.config/tmpmail/config.toml`, or
+  `$TMPMAIL_CONFIG`), so the CLI and the app agree. The app edits the file with
+  `toml_edit`: your comments, the other keys and their order stay; a field still at its
+  default isn't added; the file is replaced in one step (temporary file, then rename) with
+  its permissions kept, and only if a field changed. A config the CLI couldn't read is
+  never written.
+- Notifications, the tray and start hidden are the app's own, in `gui.json` next to
+  `config.toml`. They aren't a `[gui]` table in `config.toml` because the CLI rejects
+  unknown keys there, so such a table would stop every CLI, the released 0.2.0 included,
+  from starting.
+- The theme and pane widths stay in the webview's own storage, as before.
+
+## Dragging attachments out
+
+Best effort, on Linux and macOS. It uses `drag` 2.1.1, the engine of the third-party
+`tauri-plugin-drag` (CrabNebula), from Rust: the plugin's own command takes any file path
+from the page, and the page never names a path, only "attachment N of the opened message".
+When the pointer reaches an attachment's grip, Rust downloads it into a private temporary
+directory (`tmpmail-drag-*`, mode 0700, one 0700 subdirectory per attachment, the file
+0600 under its sanitized name); dragging the grip then drags that file. Files are deleted
+10 minutes later (when another is prepared) and when the app quits. Not on Windows, where
+a drag can hang the whole app (drag-rs #94). Save stays the dependable way.
 
 ## Dark mail
 
@@ -142,12 +203,13 @@ on Linux, macOS and Windows.
    for http and https.
 5. Privileged work happens in Rust commands: the clipboard (`tauri-plugin-clipboard-manager`),
    the save dialog (`tauri-plugin-dialog`, then `std::fs::write` to a new file under a
-   sanitized name) and the opener. The page has **no** plugin permission, only the app's
+   sanitized name), the opener, notifications (`tauri-plugin-notification`), the tray and
+   dragging files out. The page has **no** plugin permission, only the app's
    own commands, each listed in `capabilities/main.json` and `build.rs`
    (`AppManifest::commands`).
 6. Commands check their input: an address must be a stored inbox, a message key one the app
    opened, a link or attachment index one of that message's; usernames, domains, labels and
    ids are checked for shape. Copying takes what to copy (the code, the sender, link N), not
-   arbitrary text.
+   arbitrary text. Settings are checked field by field in Rust before anything is written.
 7. The shell has a strict CSP, `freezePrototype`, no global Tauri object, no asset protocol,
    and one capability.

@@ -12,12 +12,14 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 use serde_json::{Value, json};
 use tauri::{AppHandle, Emitter, UriSchemeResponder};
 use tmpmail::app::{App, Global};
+use tmpmail::config::Config;
 use tmpmail::provider::{self, CreateOpts, Summary};
 use tmpmail::render::clean_line;
 use tmpmail::watcher::{self, Watcher};
 
+use crate::notify::{self, Arrivals};
 use crate::{Mails, Shared};
-use crate::{commands, scheme};
+use crate::{commands, scheme, tray};
 
 pub enum Req {
     /// The window just loaded: send the inbox list and every inbox's last
@@ -27,7 +29,11 @@ pub enum Req {
         provider: Option<String>,
         opts: CreateOpts,
         label: Option<String>,
+        /// From the tray menu: copy the address and say so in a notification.
+        from_tray: bool,
     },
+    /// The settings were saved: read the config again.
+    Reload,
     /// List this inbox now instead of on its next tick.
     Select {
         address: String,
@@ -92,6 +98,7 @@ pub fn spawn(handle: AppHandle, shared: Arc<Shared>) -> Result<Sender<Req>, Stri
                     shared,
                     log,
                     last: HashMap::new(),
+                    arrivals: Arrivals::default(),
                 },
             );
         })
@@ -110,6 +117,8 @@ struct Front {
     log: Receiver<String>,
     /// The last `messages` event of each inbox, for `Req::Refresh`.
     last: HashMap<String, Value>,
+    /// New mail waiting for its notification.
+    arrivals: Arrivals,
 }
 
 impl Front {
@@ -142,6 +151,8 @@ impl watcher::Front for Front {
             .collect();
         self.last
             .retain(|address, _| app.state.position(address).is_some());
+        self.arrivals
+            .retain(|address| app.state.position(address).is_some());
         let inboxes: Vec<_> = app.state.inboxes.iter().map(|i| app.view(i)).collect();
         self.handle
             .emit("inboxes", json!({ "inboxes": inboxes }))
@@ -155,7 +166,16 @@ impl watcher::Front for Front {
         live: bool,
     ) -> bool {
         let payload = match result {
-            Ok(list) => json!({ "address": address, "live": live, "messages": list }),
+            Ok(list) => {
+                let arrived = self.arrivals.listed(&address, &list);
+                for a in &arrived {
+                    if let Some(code) = &a.code {
+                        tray::saw_code(&self.shared, code, a.date);
+                    }
+                }
+                self.arrivals.queue(arrived);
+                json!({ "address": address, "live": live, "messages": list })
+            }
             Err(e) => json!({ "address": address, "live": live, "error": e }),
         };
         self.messages(address, payload)
@@ -171,6 +191,20 @@ impl watcher::Front for Front {
         for note in notes {
             self.notice("info", &note);
         }
+        if let Some(batch) = self.arrivals.due()
+            && !batch.is_empty()
+            && notify::wanted(&self.shared)
+        {
+            let (title, body) = notify::text(&batch);
+            notify::show(
+                &self.handle,
+                &self.shared,
+                &title,
+                &body,
+                notify::target(&batch),
+            );
+        }
+        tray::refresh(&self.shared);
     }
 
     fn handle(&mut self, w: &mut Watcher, req: Req) -> bool {
@@ -192,13 +226,31 @@ impl watcher::Front for Front {
                 provider,
                 opts,
                 label,
+                from_tray,
             } => {
                 match w.create_with(provider.as_deref(), &opts, label) {
                     Ok(address) => {
                         // The list first: the window selects the new inbox
                         // at once, and commands must already know it.
                         watcher::Front::inboxes(self, &w.app);
-                        let _ = self.handle.emit("created", json!({ "address": address }));
+                        let _ = self.handle.emit(
+                            "created",
+                            json!({ "address": address, "from_tray": from_tray }),
+                        );
+                        if from_tray {
+                            self.announce(&address);
+                        }
+                    }
+                    Err(e) if from_tray => {
+                        let text =
+                            format!("{}. Try again, or pick a provider in the app.", capital(&e));
+                        notify::show(
+                            &self.handle,
+                            &self.shared,
+                            "Couldn't create an address",
+                            &text,
+                            None,
+                        );
                     }
                     Err(e) => {
                         let text = format!(
@@ -207,6 +259,18 @@ impl watcher::Front for Front {
                         );
                         let _ = self.handle.emit("create_failed", json!({ "text": text }));
                     }
+                }
+                false
+            }
+            Req::Reload => {
+                match Config::load() {
+                    Ok(config) => w.set_config(config),
+                    Err(e) => self.notice(
+                        "error",
+                        &format!(
+                            "The settings were saved, but tmpmail couldn't read them back: {e}"
+                        ),
+                    ),
                 }
                 false
             }
@@ -279,6 +343,30 @@ impl watcher::Front for Front {
 }
 
 impl Front {
+    /// A new address from the tray: copied, and said so where the user
+    /// looks (the window may be hidden).
+    fn announce(&self, address: &str) {
+        let copied = tauri_plugin_clipboard_manager::ClipboardExt::clipboard(&self.handle)
+            .write_text(address)
+            .is_ok();
+        let title = if copied {
+            "New address copied"
+        } else {
+            "New address (couldn't copy it)"
+        };
+        let target = notify::Target {
+            address: address.to_string(),
+            id: None,
+        };
+        notify::show(
+            &self.handle,
+            &self.shared,
+            title,
+            &clean_line(address),
+            Some(target),
+        );
+    }
+
     fn open(&self, app: &mut App, address: String, id: String) {
         let Some(n) = app.state.position(&address) else {
             return;
@@ -287,6 +375,9 @@ impl Front {
             Ok(msg) => {
                 let mail = Mails::entry(&address, msg);
                 let msg = &mail.msg;
+                if let Some(code) = &mail.code {
+                    tray::saw_code(&self.shared, code, msg.date);
+                }
                 let attachments: Vec<_> = msg
                     .attachments
                     .iter()

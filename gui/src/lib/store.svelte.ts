@@ -56,12 +56,16 @@ class AppState {
   // Dialogs.
   newInboxOpen = $state(false);
   helpOpen = $state(false);
+  settingsOpen = $state(false);
   confirm = $state<Confirm | null>(null);
 
   // The open message's view.
   images = $state(false);
   original = $state(false);
   source = $state(false);
+
+  /** Attachments ready to drag out, by "key/index"; false while downloading. */
+  dragReady = $state<Record<string, boolean>>({});
 
   /** Message ids each inbox had at its first listing, to spot new mail. */
   #known = new Map<string, Set<string>>();
@@ -220,6 +224,47 @@ class AppState {
     if (name) this.toast("success", `Saved ${name}`);
   }
 
+  /** Downloads an attachment for dragging, when the pointer reaches it. */
+  prepareDrag(index: number) {
+    const m = this.openedMessage;
+    if (!m || !this.init?.drag) return;
+    const k = `${m.key}/${index}`;
+    if (k in this.dragReady) return;
+    this.dragReady[k] = false;
+    api.prepareAttachment(m.key, index).then(
+      () => (this.dragReady[k] = true),
+      (e) => {
+        delete this.dragReady[k];
+        this.toast("error", errorText(e));
+      },
+    );
+  }
+
+  dragOut(index: number) {
+    const m = this.openedMessage;
+    if (!m) return;
+    api.dragAttachment(m.key, index).catch((e) => {
+      // Its file may have been cleaned up: prepare it again next time.
+      delete this.dragReady[`${m.key}/${index}`];
+      this.toast("error", errorText(e));
+    });
+  }
+
+  /** Opens an inbox and, if given, one of its messages (a notification was clicked). */
+  reveal(address: string, id: string | null) {
+    if (!this.inboxes.some((i) => i.address === address)) return;
+    this.select(address);
+    if (!id) return;
+    const s = this.mail[address]?.messages.find((m) => m.id === id);
+    if (s) this.open(s);
+    else {
+      // Not listed here yet: open it by id.
+      this.openId = id;
+      this.opened = null;
+      void this.#run(api.openMessage(address, id));
+    }
+  }
+
   // ---------- events ----------
 
   #onMessages(address: string, list: Summary[]) {
@@ -269,6 +314,11 @@ class AppState {
         if (p.address === this.selected && p.id === this.openId) this.opened = p;
       }),
       on("created", (p) => {
+        if (p.from_tray) {
+          // The window's own create (if any) is still running: leave it be.
+          if (!document.querySelector("dialog[open]")) this.select(p.address);
+          return;
+        }
         this.creating = false;
         this.newInboxOpen = false;
         this.selected = null;
@@ -289,6 +339,10 @@ class AppState {
         this.toast("error", p.text);
       }),
       on("notice", (p) => this.toast(p.kind, p.text)),
+      on("reveal", (p) => {
+        if (document.querySelector("dialog[open]")) return;
+        this.reveal(p.address, p.id);
+      }),
     ];
     // Listen first, then ask for the data, so the first events aren't lost.
     void Promise.all(unlisten)

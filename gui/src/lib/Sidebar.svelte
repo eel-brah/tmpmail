@@ -5,6 +5,8 @@
   import { app } from "./store.svelte";
   import { theme, type ThemePref } from "./theme.svelte";
 
+  const mod = /Mac/.test(navigator.platform) ? "⌘" : "Ctrl";
+
   const prefs: { value: ThemePref; icon: "monitor" | "sun" | "moon"; label: string }[] = [
     { value: "system", icon: "monitor", label: "System theme" },
     { value: "light", icon: "sun", label: "Light theme" },
@@ -99,8 +101,13 @@
         </button>
       {/each}
     </div>
-    <button class="btn btn-ghost btn-icon" onclick={() => (app.helpOpen = true)} title="Keyboard shortcuts (?)" aria-label="Keyboard shortcuts">
-      <Icon name="keyboard" />
-    </button>
+    <span class="flex gap-0.5">
+      <button class="btn btn-ghost btn-icon" onclick={() => (app.helpOpen = true)} title="Keyboard shortcuts (?)" aria-label="Keyboard shortcuts">
+        <Icon name="keyboard" />
+      </button>
+      <button class="btn btn-ghost btn-icon" onclick={() => (app.settingsOpen = true)} title="Settings ({mod}+,)" aria-label="Settings">
+        <Icon name="settings" />
+      </button>
+    </span>
   </footer>
 </nav>

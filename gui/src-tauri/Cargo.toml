@@ -17,9 +17,25 @@ tauri-build = { version = "2.7.4", features = [] }
 [dependencies]
 # The core only: no clap, ratatui or qrcode.
 tmpmail = { path = "../..", default-features = false }
-tauri = { version = "2.12.5", features = [] }
+tauri = { version = "2.12.5", features = ["tray-icon", "image-png"] }
 tauri-plugin-opener = "2.7.2"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 tauri-plugin-clipboard-manager = "2"
 tauri-plugin-dialog = "2"
+tauri-plugin-notification = "2.8.0"
+# Writes config.toml keeping the user's comments and unknown keys.
+toml_edit = "0.25"
+tempfile = "3.27.0"
+chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
+
+# Dragging attachments out (the engine of `tauri-plugin-drag`, used from Rust
+# only). Not on Windows: a drag there can hang the whole app (drag-rs #94).
+[target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
+drag = "2.1.1"
+
+# Body markup support of the notification server, and whether a tray host
+# runs (both over D-Bus); already in the tree through the notification plugin.
+[target.'cfg(target_os = "linux")'.dependencies]
+notify-rust = "4.18.2"
+zbus = { version = "5.13.2", default-features = false, features = ["blocking-api", "async-io"] }

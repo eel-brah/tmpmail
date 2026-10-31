@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::sync::mpsc::channel;
 
 use serde_json::{Value, json};
-use tauri::{AppHandle, State, Url};
+use tauri::{AppHandle, State, Url, WebviewWindow};
 use tauri_plugin_clipboard_manager::ClipboardExt;
 use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_opener::OpenerExt;
@@ -17,9 +17,9 @@ use tmpmail::provider::{self, CreateOpts};
 use tmpmail::render::{clean_line, safe_filename};
 
 use crate::worker::Req;
-use crate::{Shared, scheme};
+use crate::{Shared, drag, scheme, settings, tray};
 
-fn send(shared: &Shared, req: Req) -> Result<(), String> {
+pub fn send(shared: &Shared, req: Req) -> Result<(), String> {
     if let Some(e) = shared.start_error.get() {
         return Err(e.clone());
     }
@@ -125,7 +125,12 @@ pub fn init(shared: State<'_, Arc<Shared>>) -> Result<Value, String> {
         .map(|p| json!({ "id": p.id(), "name": p.name(), "caps": p.caps() }))
         .collect();
     send(&shared, Req::Refresh)?;
-    Ok(json!({ "origin": scheme::origin(), "providers": providers, "probe": probe }))
+    Ok(json!({
+        "origin": scheme::origin(),
+        "providers": providers,
+        "probe": probe,
+        "drag": drag::SUPPORTED,
+    }))
 }
 
 /// The domains a provider offers, for the new inbox dialog.
@@ -170,6 +175,7 @@ pub fn create_inbox(
             provider,
             opts,
             label,
+            from_tray: false,
         },
     )
 }
@@ -300,16 +306,7 @@ pub async fn save_attachment(
     key: u64,
     index: usize,
 ) -> Result<Option<String>, String> {
-    let filename = {
-        let mails = shared.mails.lock().expect("mails lock");
-        let mail = mails.get(key).ok_or("that message is no longer open")?;
-        let att = mail
-            .msg
-            .attachments
-            .get(index)
-            .ok_or("no such attachment")?;
-        safe_filename(&att.filename, "attachment")
-    };
+    let filename = attachment_name(&shared, key, index)?;
     let worker = shared
         .worker
         .get()
@@ -358,6 +355,120 @@ pub async fn save_attachment(
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+/// The settings screen's fields, as they are in the files.
+#[tauri::command]
+pub async fn settings(shared: State<'_, Arc<Shared>>) -> Result<settings::View, String> {
+    let host = tauri::async_runtime::spawn_blocking(tray::host_available)
+        .await
+        .unwrap_or(false);
+    shared
+        .tray_host
+        .store(host, std::sync::atomic::Ordering::Relaxed);
+    let gui = shared.gui.lock().expect("gui lock").clone();
+    settings::view(gui, host)
+}
+
+/// Saves the settings (checked in `settings::Input::check`), then applies
+/// them: the tray at once, the rest in the worker without a restart. Runs on
+/// the main thread, where the tray is made.
+#[tauri::command]
+pub fn save_settings(
+    app: AppHandle,
+    shared: State<'_, Arc<Shared>>,
+    input: settings::Input,
+) -> Result<(), String> {
+    let (gui, config_changed) = settings::save(&input)?;
+    *shared.gui.lock().expect("gui lock") = gui.clone();
+    // Only a changed config restarts polling (and the push streams). Without
+    // a worker (it couldn't start) there is nothing to reload.
+    if config_changed && shared.start_error.get().is_none() {
+        send(&shared, Req::Reload)?;
+    }
+    tray::set(&app, &shared, gui.tray)
+        .map_err(|e| format!("The settings were saved, but the tray icon failed: {e}"))
+}
+
+/// Shows the config file in the file manager.
+#[tauri::command]
+pub async fn reveal_config(app: AppHandle) -> Result<(), String> {
+    let path =
+        tmpmail::config::Config::path().ok_or("there is no config directory on this system")?;
+    if !path.exists() {
+        return Err(
+            "There's no config file yet. tmpmail creates it when you save a provider, interval, \
+             push or timeout setting."
+                .into(),
+        );
+    }
+    app.opener()
+        .reveal_item_in_dir(&path)
+        .map_err(|e| format!("Couldn't show {}: {e}", path.display()))
+}
+
+/// The opened message's attachment `index`, by its sanitized name.
+fn attachment_name(shared: &Shared, key: u64, index: usize) -> Result<String, String> {
+    let mails = shared.mails.lock().expect("mails lock");
+    let mail = mails.get(key).ok_or("that message is no longer open")?;
+    let att = mail
+        .msg
+        .attachments
+        .get(index)
+        .ok_or("no such attachment")?;
+    Ok(safe_filename(&att.filename, "attachment"))
+}
+
+/// Downloads an attachment into the private drag directory, so a drag can
+/// start at once. Returns once it is ready.
+#[tauri::command]
+pub async fn prepare_attachment(
+    shared: State<'_, Arc<Shared>>,
+    key: u64,
+    index: usize,
+) -> Result<(), String> {
+    if !drag::SUPPORTED {
+        return Err("Dragging files out isn't available on this system. Use Save instead.".into());
+    }
+    let name = attachment_name(&shared, key, index)?;
+    if shared.drag.path(key, index).is_some() {
+        return Ok(());
+    }
+    let worker = shared
+        .worker
+        .get()
+        .cloned()
+        .ok_or("the worker is not running")?;
+    let shared = Arc::clone(&shared);
+    tauri::async_runtime::spawn_blocking(move || {
+        let (reply, answer) = channel();
+        worker
+            .send(Req::Attachment { key, index, reply })
+            .map_err(|_| "the worker stopped".to_string())?;
+        let bytes = answer
+            .recv()
+            .map_err(|_| "the worker stopped".to_string())??;
+        shared.drag.write(key, index, &name, &bytes).map(|_| ())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Starts dragging a prepared attachment out of the window. Runs on the main
+/// thread, as the drag must.
+#[tauri::command]
+pub fn drag_attachment(
+    window: WebviewWindow,
+    shared: State<'_, Arc<Shared>>,
+    key: u64,
+    index: usize,
+) -> Result<(), String> {
+    attachment_name(&shared, key, index)?;
+    let path = shared
+        .drag
+        .path(key, index)
+        .ok_or("Still downloading it. Try again in a moment.")?;
+    drag::start(&window, path)
 }
 
 #[cfg(test)]

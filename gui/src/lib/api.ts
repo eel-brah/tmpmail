@@ -31,6 +31,38 @@ export interface Init {
   origin: string;
   providers: ProviderInfo[];
   probe: ProbePlan | null;
+  /** Whether attachments can be dragged out on this system. */
+  drag: boolean;
+}
+
+export interface GuiSettings {
+  notifications: boolean;
+  tray: boolean;
+  start_minimized: boolean;
+}
+
+export interface SettingsView {
+  config_path: string | null;
+  config_exists: boolean;
+  /** Enabled providers in fallback order, then the others. */
+  providers: { id: string; name: string; enabled: boolean }[];
+  poll_interval: number;
+  push: boolean;
+  http_timeout: number;
+  gui: GuiSettings;
+  /** Environment variables that are set and win over the file. */
+  overrides: string[];
+  /** Whether a tray icon can be shown (Linux: a StatusNotifier host runs). */
+  tray_host: boolean;
+  os: string;
+}
+
+export interface SettingsInput extends GuiSettings {
+  /** The enabled providers, in fallback order. */
+  providers: string[];
+  poll_interval: number;
+  push: boolean;
+  http_timeout: number;
 }
 
 export interface InboxView {
@@ -96,11 +128,14 @@ export interface Events {
   inboxes: { inboxes: InboxView[] };
   messages: MessagesEvent;
   opened: OpenedEvent;
-  created: { address: string };
+  /** `from_tray`: made from the tray menu, not the window's own request. */
+  created: { address: string; from_tray: boolean };
   /** Creating an inbox failed: why, and what to try. */
   create_failed: { text: string };
   deleted: { address: string; id: string };
   notice: Notice;
+  /** A notification or the tray brought the window back: open this. */
+  reveal: { address: string; id: string | null };
 }
 
 export function on<K extends keyof Events>(
@@ -131,6 +166,11 @@ export const api = {
     invoke<void>("copy_from_message", { key, part, index: index ?? null }),
   openLink: (key: number, index: number) => invoke<void>("open_link", { key, index }),
   saveAttachment: (key: number, index: number) => invoke<string | null>("save_attachment", { key, index }),
+  settings: () => invoke<SettingsView>("settings"),
+  saveSettings: (input: SettingsInput) => invoke<void>("save_settings", { input }),
+  revealConfig: () => invoke<void>("reveal_config"),
+  prepareAttachment: (key: number, index: number) => invoke<void>("prepare_attachment", { key, index }),
+  dragAttachment: (key: number, index: number) => invoke<void>("drag_attachment", { key, index }),
   probeFinish: () => invoke<void>("probe_finish"),
 };
 
