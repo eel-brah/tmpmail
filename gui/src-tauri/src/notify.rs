@@ -19,6 +19,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::json;
 use tauri::{AppHandle, Emitter, Manager};
+#[cfg(not(target_os = "linux"))]
 use tauri_plugin_notification::NotificationExt;
 use tmpmail::extract;
 use tmpmail::provider::Summary;
@@ -33,6 +34,7 @@ const SENDER_MAX: usize = 48;
 const SUBJECT_MAX: usize = 100;
 const CODE_MAX: usize = 32;
 /// How many notifications remember what a click opens.
+#[cfg(not(target_os = "linux"))]
 const KEEP_CLICKS: usize = 64;
 /// The link scheme a Windows toast launches (registered by the installer,
 /// `packaging/windows/hooks.nsh`).
@@ -202,7 +204,7 @@ pub fn target(batch: &[Arrival]) -> Option<Target> {
 
 /// Escapes the body for servers that read it as markup (most Linux ones),
 /// so a subject like `<img src=…>` is shown, never loaded.
-fn body_for_server(body: &str) -> String {
+pub fn body_for_server(body: &str) -> String {
     #[cfg(target_os = "linux")]
     {
         use std::sync::OnceLock;
@@ -382,6 +384,27 @@ pub fn show(app: &AppHandle, shared: &Shared, title: &str, body: &str, target: O
             Err(e) => eprintln!("tmpmail-gui: could not show a toast ({e}), trying the plugin"),
         }
     }
+    #[cfg(target_os = "linux")]
+    {
+        let _ = app;
+        match shared.freedesktop.get() {
+            Some(notifier) => notifier.show(title, body, target),
+            None => eprintln!("tmpmail-gui: notifications aren't set up yet"),
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    show_with_plugin(app, shared, title, body, target);
+}
+
+/// Windows (debug or not installed) and macOS: through the plugin.
+#[cfg(not(target_os = "linux"))]
+fn show_with_plugin(
+    app: &AppHandle,
+    shared: &Shared,
+    title: &str,
+    body: &str,
+    target: Option<Target>,
+) {
     let id = shared.next_notification.fetch_add(1, Ordering::Relaxed);
     if let Some(t) = target {
         let mut clicks = shared.clicks.lock().expect("clicks lock");
@@ -460,19 +483,46 @@ pub fn relaunched(app: &AppHandle, shared: &Shared, args: &[String]) {
 /// Brings the window back (from the tray, minimized or behind others) and
 /// tells the page what to open.
 pub fn reveal(app: &AppHandle, target: Option<Target>) {
+    raise(app);
+    open(app, target);
+}
+
+/// Shows, unminimizes and focuses the window. (A compositor may refuse
+/// the focus: on Linux a notification click brings a token for it.)
+pub fn raise(app: &AppHandle) {
     if let Some(w) = app.get_webview_window("main") {
         let _ = w.unminimize();
         let _ = w.show();
         let _ = w.set_focus();
     }
+}
+
+/// Tells the page what to open.
+fn open(app: &AppHandle, target: Option<Target>) {
     if let Some(t) = target {
         let _ = app.emit("reveal", json!({ "address": t.address, "id": t.id }));
     }
 }
 
+/// Linux: shows notifications through the notification server directly
+/// (`freedesktop.rs`). A click brings the window back with the activation
+/// token the server sent for it, or as before without one (an older server).
+#[cfg(target_os = "linux")]
+pub fn register(app: &AppHandle, shared: Arc<Shared>) {
+    let handle = app.clone();
+    let notifier = crate::freedesktop::Notifier::new(move |target, token| {
+        if !token.is_some_and(|t| crate::freedesktop::raise(&handle, t)) {
+            raise(&handle);
+        }
+        open(&handle, target);
+    });
+    let _ = shared.freedesktop.set(notifier);
+}
+
 /// Routes clicks on notifications. Registered before the first notification
 /// is shown: the plugin reports clicks only for notifications shown while a
 /// handler exists.
+#[cfg(not(target_os = "linux"))]
 pub fn register(app: &AppHandle, shared: Arc<Shared>) {
     let handle = app.clone();
     let registered = app.notification().on_action(move |performed| {

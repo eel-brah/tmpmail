@@ -43,7 +43,14 @@ preview on `gui-v*` tags; install steps are in the [main README](../README.md#de
   none; on macOS the system decides whether to ask when the first one is shown (not tested
   yet; System Settings → Notifications turns them on or off), and debug builds started with
   `tauri dev` post as Terminal. Clicks are reported on Linux (servers with the `default` action, e.g.
-  KDE, GNOME) and on macOS. On Windows the installed app shows its own toasts, which launch a
+  KDE, GNOME) and on macOS. On Linux the app talks to the notification server over D-Bus
+  itself (not through the plugin), to use the `ActivationToken` the server sends with a
+  click (Notifications spec 1.2+, KDE Plasma and GNOME): the token goes to GTK, which hands
+  it to the compositor (`xdg_activation_v1` on Wayland; on X11 its `_TIME` part becomes
+  the window's user time), so KWin's focus-stealing prevention lets the window come to the
+  front instead of only flashing its taskbar entry. The token is taken only from the server
+  that showed the notification, only as printable ASCII of at most 512 bytes, and used
+  once; without one (an older server) the window is raised as before. On Windows the installed app shows its own toasts, which launch a
   `tmpmail-desktop://open?inbox=…&message=…` link the installer registers: a click, on
   screen or later in the notification center, brings the running app back (only one runs:
   a second start hands its link over and exits) or starts it, and opens the message. A
@@ -347,7 +354,7 @@ to `probe.log`, both are uploaded, and the job fails unless `probe.json` parses 
    that failed, the caller check refuses every command from a frame.
 6. Privileged work happens in Rust commands: the clipboard (`tauri-plugin-clipboard-manager`),
    the save dialog (`tauri-plugin-dialog`, then `std::fs::write` to a new file under a
-   sanitized name), the opener, notifications (`tauri-plugin-notification`), the tray and
+   sanitized name), the opener, notifications (`tauri-plugin-notification`; on Linux D-Bus, `freedesktop.rs`), the tray and
    dragging files out. The page has **no** plugin permission, only the app's
    own commands, each listed in `capabilities/main.json` and `build.rs`
    (`AppManifest::commands`).

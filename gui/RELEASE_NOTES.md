@@ -11,6 +11,9 @@ has only been checked by the automated security probe. Please report what breaks
 - **Linux: the window shows the tmpmail icon** in the title bar and the task switcher. KDE
   on Wayland showed its generic "W" icon, since the window's app ID (`tmpmail-gui`)
   matched no desktop file; it is now `tmpmail`, like the desktop file.
+- **Linux: clicking a notification brings the window to the front** on KDE. The message
+  opened, but KWin only flashed the taskbar entry; the app now passes on the activation
+  token the notification server sends with the click.
 
 ## What's new in 0.1.1
 

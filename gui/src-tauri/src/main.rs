@@ -10,6 +10,8 @@
 mod caller;
 mod commands;
 mod drag;
+#[cfg(target_os = "linux")]
+mod freedesktop;
 mod notify;
 mod scheme;
 mod settings;
@@ -20,7 +22,7 @@ mod worker;
 mod probe;
 
 use std::collections::{BTreeMap, HashMap};
-use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -131,12 +133,17 @@ pub struct Shared {
     pub tray_host: AtomicBool,
     /// The newest code seen, for the tray's "Copy last code".
     pub last_code: Mutex<Option<tray::LastCode>>,
-    /// What a click on each shown notification opens.
+    /// What a click on each shown notification opens (the plugin's).
+    #[cfg(not(target_os = "linux"))]
     pub clicks: Mutex<HashMap<i32, notify::Target>>,
     /// What a click on a notification asked for before the page was up
     /// (Windows: the click started the app); `init` hands it over.
     pub pending: Mutex<notify::Pending>,
-    pub next_notification: AtomicI32,
+    #[cfg(not(target_os = "linux"))]
+    pub next_notification: std::sync::atomic::AtomicI32,
+    /// Linux: notifications go to the notification server directly.
+    #[cfg(target_os = "linux")]
+    pub freedesktop: OnceLock<Arc<freedesktop::Notifier>>,
     /// Attachments written out for dragging.
     pub drag: drag::Files,
     #[cfg(debug_assertions)]
@@ -278,12 +285,16 @@ fn main() {
         tray: Mutex::new(None),
         tray_host: AtomicBool::new(true),
         last_code: Mutex::new(None),
+        #[cfg(not(target_os = "linux"))]
         clicks: Mutex::new(HashMap::new()),
         pending: Mutex::new(notify::Pending {
             page_ready: false,
             target: pending,
         }),
-        next_notification: AtomicI32::new(1),
+        #[cfg(not(target_os = "linux"))]
+        next_notification: std::sync::atomic::AtomicI32::new(1),
+        #[cfg(target_os = "linux")]
+        freedesktop: OnceLock::new(),
         drag: drag::Files::default(),
         #[cfg(debug_assertions)]
         probe,
