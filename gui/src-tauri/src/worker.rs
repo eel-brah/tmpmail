@@ -371,8 +371,7 @@ impl Front {
         let Some(n) = app.state.position(&address) else {
             return;
         };
-        // Marks it read too, in the state file the CLI and TUI read.
-        let payload = match app.open_message(n, &id) {
+        let (payload, opened) = match app.with_inbox_at(n, |p, inbox| p.get(inbox, &id)) {
             Ok(msg) => {
                 let mail = Mails::entry(&address, msg);
                 let msg = &mail.msg;
@@ -405,11 +404,19 @@ impl Front {
                 });
                 let key = self.shared.mails.lock().expect("mails lock").insert(mail);
                 event["key"] = json!(key);
-                event
+                (event, true)
             }
-            Err(e) => json!({ "address": address, "id": id, "error": e.to_string() }),
+            Err(e) => (
+                json!({ "address": address, "id": id, "error": e.to_string() }),
+                false,
+            ),
         };
         let _ = self.handle.emit("opened", payload);
+        // Read now, in the state file the CLI and TUI read too; after the
+        // page has the message, so the file write doesn't delay it.
+        if opened {
+            app.mark_read_noting(n, &id);
+        }
     }
 
     /// Serves an inline image, fetching it from the provider the first

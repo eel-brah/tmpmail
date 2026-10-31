@@ -7,7 +7,7 @@ use serde::Serialize;
 
 use crate::config::Config;
 use crate::error::{Error, Result};
-use crate::provider::{self, CreateOpts, Inbox, Message, Provider, Summary};
+use crate::provider::{self, CreateOpts, Inbox, Provider, Summary};
 use crate::render::{clean, clean_line};
 use crate::store::{State, Store};
 
@@ -15,7 +15,7 @@ use crate::store::{State, Store};
 #[cfg(feature = "cli")]
 use {
     crate::extract,
-    crate::provider::Capabilities,
+    crate::provider::{Capabilities, Message},
     crate::push::Poller,
     crate::render::{body_text, safe_filename, safe_html_document},
     crate::system,
@@ -367,18 +367,10 @@ impl App {
 
     /// [`App::mark_read`], noting a failure instead of returning it: the
     /// message was shown either way.
-    pub(crate) fn mark_read_noting(&mut self, n: usize, id: &str) {
+    pub fn mark_read_noting(&mut self, n: usize, id: &str) {
         if let Err(e) = self.mark_read(n, id) {
             self.note(&format!("couldn't mark the message read: {e}"));
         }
-    }
-
-    /// Fetches message `id` of inbox `n` and remembers that it was read. A
-    /// failure to remember is only noted: the message is there.
-    pub fn open_message(&mut self, n: usize, id: &str) -> Result<Message> {
-        let msg = self.with_inbox_at(n, |p, inbox| p.get(inbox, id))?;
-        self.mark_read_noting(n, id);
-        Ok(msg)
     }
 
     /// Remembers in the state file that message `id` of inbox `n` was read,
@@ -707,6 +699,7 @@ pub(crate) fn relative(t: DateTime<Utc>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::provider::Message;
     use serde_json::Value;
 
     /// Lists messages "1" and "2", neither seen at the provider; a listing
@@ -775,7 +768,7 @@ mod tests {
         cli.state = cli.store.load().unwrap();
 
         assert_eq!(seen(&mut gui), [false, false]);
-        gui.open_message(0, "1").unwrap();
+        gui.mark_read(0, "1").unwrap();
         assert_eq!(seen(&mut gui), [true, false]);
         assert_eq!(cli.store.load().unwrap().inboxes[0].read, ["1"]);
 

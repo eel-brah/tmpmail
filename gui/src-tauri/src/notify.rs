@@ -220,12 +220,20 @@ fn body_for_server(body: &str) -> String {
     body.to_string()
 }
 
-/// Escapes text for markup: a Linux server's body, a Windows toast's XML.
+/// Escapes the body for a Linux server that reads markup. Quotes stay: they
+/// need no escape there, and some servers would show `&apos;` as is.
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn escape_markup(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
+}
+
+/// [`escape_markup`] plus quotes, for the toast's XML (text and the
+/// `launch` attribute). Not for Linux servers: some show `&apos;` as is.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn escape_xml(s: &str) -> String {
+    escape_markup(s)
         .replace('"', "&quot;")
         .replace('\'', "&apos;")
 }
@@ -295,10 +303,14 @@ fn installed() -> bool {
         if cfg!(debug_assertions) {
             return false;
         }
-        let Ok(exe) = tauri::utils::platform::current_exe() else {
+        // Not Tauri's `current_exe`: it is canonicalized, so it starts with
+        // `\\?\`, which the installer's path doesn't.
+        let Ok(exe) = std::env::current_exe() else {
             return false;
         };
-        let expected = format!("\"{}\" \"%1\"", exe.display());
+        let exe = exe.display().to_string();
+        let exe = exe.strip_prefix(r"\\?\").unwrap_or(&exe);
+        let expected = format!("\"{exe}\" \"%1\"");
         scheme_command().is_some_and(|c| c.eq_ignore_ascii_case(&expected))
     })
 }
@@ -336,7 +348,7 @@ fn scheme_command() -> Option<String> {
 /// launches `link`. Title and body are the sender's words, escaped.
 #[cfg_attr(not(windows), allow(dead_code))]
 fn toast_xml(title: &str, body: &str, link: &str) -> String {
-    let esc = escape_markup;
+    let esc = escape_xml;
     format!(
         "<toast activationType=\"protocol\" launch=\"{}\"><visual><binding template=\"ToastGeneric\">\
          <text>{}</text><text>{}</text></binding></visual></toast>",
@@ -411,38 +423,38 @@ pub struct Pending {
 /// was clicked, or the app was started again): brings the window back and
 /// opens what an activation link asks for, if it names a stored inbox.
 /// Before the page is up, the target waits for `init` (the page checks it
-/// against its inboxes). At most once a second, so a flood of links can't
-/// keep taking the focus.
+/// against its inboxes). A start without a link focuses the window at most
+/// once a second, so a flood of starts can't keep taking the focus.
 #[cfg(all(windows, not(debug_assertions)))]
 pub fn relaunched(app: &AppHandle, shared: &Shared, args: &[String]) {
     static LAST: std::sync::Mutex<Option<Instant>> = std::sync::Mutex::new(None);
-    {
+    let target = args.iter().skip(1).find_map(|a| activation(a));
+    let page_ready = {
+        let mut pending = shared.pending.lock().expect("pending lock");
+        if !pending.page_ready && target.is_some() {
+            // The inboxes aren't known yet: the page checks it.
+            pending.target = target.clone();
+        }
+        pending.page_ready
+    };
+    let target = target.filter(|t| {
+        !page_ready
+            || shared
+                .inboxes
+                .lock()
+                .expect("inboxes lock")
+                .contains_key(&t.address)
+    });
+    // Nothing to open (no link, or not a stored inbox): only focus, at most
+    // once a second.
+    if target.is_none() {
         let mut last = LAST.lock().expect("relaunch lock");
         if last.is_some_and(|t| t.elapsed() < Duration::from_secs(1)) {
             return;
         }
         *last = Some(Instant::now());
     }
-    let target = args.iter().skip(1).find_map(|a| activation(a));
-    {
-        let mut pending = shared.pending.lock().expect("pending lock");
-        if !pending.page_ready {
-            if target.is_some() {
-                pending.target = target;
-            }
-            drop(pending);
-            reveal(app, None);
-            return;
-        }
-    }
-    let target = target.filter(|t| {
-        shared
-            .inboxes
-            .lock()
-            .expect("inboxes lock")
-            .contains_key(&t.address)
-    });
-    reveal(app, target);
+    reveal(app, if page_ready { target } else { None });
 }
 
 /// Brings the window back (from the tray, minimized or behind others) and
@@ -640,6 +652,7 @@ mod tests {
             escape_markup("<img src=x> & <b>"),
             "&lt;img src=x&gt; &amp; &lt;b&gt;"
         );
-        assert_eq!(escape_markup(r#""a's""#), "&quot;a&apos;s&quot;");
+        assert_eq!(escape_markup(r#""a's""#), r#""a's""#);
+        assert_eq!(escape_xml(r#"<"a's">"#), "&lt;&quot;a&apos;s&quot;&gt;");
     }
 }

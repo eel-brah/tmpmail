@@ -42,9 +42,19 @@ const KEEP_MAILS: usize = 32;
 /// logical pixels.
 const WINDOW: (f64, f64) = (1240.0, 780.0);
 const WINDOW_MIN: (f64, f64) = (900.0, 560.0);
-/// Room left around the window in the work area: borders, and the title
-/// bar the system adds above the content.
+/// Room left around the window's content in the work area: borders, and
+/// the title bar the system adds above the content.
 const WINDOW_MARGIN: (f64, f64) = (16.0, 48.0);
+/// The margin Tauri's `prevent_overflow` leaves. On Windows it adds the
+/// real title bar itself, so less is asked there; either way the window it
+/// makes is at least as tall as [`fit_window`]'s minimum.
+const OVERFLOW_MARGIN: (f64, f64) = if cfg!(windows) {
+    // Tauri's title bar comes from DPI-unaware metrics, a little short at
+    // high scaling: some extra room.
+    (16.0, 24.0)
+} else {
+    WINDOW_MARGIN
+};
 
 /// The window's size and minimum size for a work area of `work` logical
 /// pixels: the defaults, made smaller on a screen too small for them, so
@@ -72,9 +82,24 @@ fn work_area(monitor: &tauri::window::Monitor) -> (f64, f64) {
 /// Lets the window shrink to fit the monitor it is now on (it moved, or the
 /// scale changed). Its size is left alone.
 fn fit_min_size(window: &tauri::Window) {
+    // Moves come by the hundred while the window is dragged: act only when
+    // the work area changed.
+    static LAST: Mutex<Option<(f64, f64)>> = Mutex::new(None);
     if let Ok(Some(monitor)) = window.current_monitor() {
-        let (_, min) = fit_window(work_area(&monitor));
-        let _ = window.set_min_size(Some(tauri::LogicalSize::new(min.0, min.1)));
+        let work = work_area(&monitor);
+        let mut last = LAST
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if *last == Some(work) {
+            return;
+        }
+        let (_, min) = fit_window(work);
+        if window
+            .set_min_size(Some(tauri::LogicalSize::new(min.0, min.1)))
+            .is_ok()
+        {
+            *last = Some(work);
+        }
     }
 }
 
@@ -262,8 +287,10 @@ fn main() {
     // only: a debug build (and the probe) runs beside the installed app.
     #[cfg(all(windows, not(debug_assertions)))]
     let builder = builder.plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
-        let shared = app.state::<Arc<Shared>>();
-        notify::relaunched(app, &shared, &args);
+        // Managed on the builder, so there from the start.
+        if let Some(shared) = app.try_state::<Arc<Shared>>() {
+            notify::relaunched(app, &shared, &args);
+        }
     }));
     let builder = builder
         .plugin(tauri_plugin_opener::init())
@@ -350,8 +377,8 @@ fn main() {
 
     let for_exit = shared.clone();
     let result = builder
+        .manage(shared.clone())
         .setup(move |app| {
-            app.manage(shared.clone());
             // Before anything can show a notification.
             notify::register(app.handle(), shared.clone());
             #[cfg(debug_assertions)]
@@ -372,7 +399,16 @@ fn main() {
                 let host = tray::host_available();
                 shared.tray_host.store(host, Ordering::Relaxed);
                 match tray::set(app.handle(), &shared, true) {
-                    Ok(()) => hidden = start_hidden && host,
+                    // Not when a notification click is waiting (Windows).
+                    Ok(()) => {
+                        let waiting = shared
+                            .pending
+                            .lock()
+                            .expect("pending lock")
+                            .target
+                            .is_some();
+                        hidden = start_hidden && host && !waiting;
+                    }
                     Err(e) => eprintln!("tmpmail-gui: no tray icon: {e}"),
                 }
             }
@@ -395,8 +431,8 @@ fn main() {
                     .inner_size(WINDOW.0, WINDOW.1)
                     .min_inner_size(min.0, min.1)
                     .prevent_overflow_with_margin(tauri::LogicalSize::new(
-                        WINDOW_MARGIN.0,
-                        WINDOW_MARGIN.1,
+                        OVERFLOW_MARGIN.0,
+                        OVERFLOW_MARGIN.1,
                     ));
             if size != WINDOW {
                 builder = builder.center();

@@ -93,6 +93,8 @@ enum Ev {
     },
     Opened {
         address: String,
+        /// The id asked for (a message's own may be spelled differently).
+        id: String,
         result: std::result::Result<Box<Message>, String>,
     },
     Deleted {
@@ -169,7 +171,11 @@ impl watcher::Front for Front {
                     .with_inbox_at(n, |p, inbox| p.get(inbox, &id))
                     .map(Box::new)
                     .map_err(|e| e.to_string());
-                let _ = tx.send(Ev::Opened { address, result });
+                let _ = tx.send(Ev::Opened {
+                    address,
+                    id,
+                    result,
+                });
                 false
             }
             Req::Create(provider) => {
@@ -260,6 +266,9 @@ struct Ui {
     /// The message the preview shows, and its state.
     shown: Option<(String, String)>,
     preview: Preview,
+    /// The user went to the shown message before it loaded: mark it read
+    /// once it has.
+    read_on_load: bool,
     /// The preview's text for (message id, width), since converting HTML
     /// on every frame would be wasteful.
     rendered: Option<(String, u16, Text<'static>)>,
@@ -287,6 +296,7 @@ impl Ui {
             fresh: HashSet::new(),
             cache: HashMap::new(),
             shown: None,
+            read_on_load: false,
             preview: Preview::None,
             rendered: None,
             scroll: 0,
@@ -455,16 +465,24 @@ impl Ui {
                     self.load_preview();
                 }
             }
-            Ev::Opened { address, result } => match result {
+            Ev::Opened {
+                address,
+                id,
+                result,
+            } => match result {
                 Ok(msg) => {
-                    let key = (address, msg.id.clone());
-                    if self.shown.as_ref() == Some(&key) {
+                    let key = (address, id);
+                    let shown = self.shown.as_ref() == Some(&key);
+                    if shown {
                         self.preview = Preview::Ready(msg.clone());
                     }
                     self.cache.insert(key, msg);
+                    if shown && self.read_on_load {
+                        self.mark_shown_read();
+                    }
                 }
                 Err(e) => {
-                    if self.shown.as_ref().is_some_and(|(a, _)| *a == address) {
+                    if self.shown.as_ref() == Some(&(address, id)) {
                         self.preview = Preview::Failed(e);
                     }
                 }
@@ -500,6 +518,11 @@ impl Ui {
         let Some((address, id)) = self.shown.clone() else {
             return;
         };
+        // Only a message the user could see: when it has loaded.
+        self.read_on_load = !matches!(self.preview, Preview::Ready(_));
+        if self.read_on_load {
+            return;
+        }
         let Some(s) = self
             .mail
             .get_mut(&address)
@@ -518,6 +541,10 @@ impl Ui {
             return;
         }
         self.scroll = 0;
+        // A retry of the same message (it failed) keeps the wish to read it.
+        if key != self.shown {
+            self.read_on_load = false;
+        }
         self.shown = key.clone();
         self.preview = match key {
             None => Preview::None,
@@ -1298,11 +1325,28 @@ mod tests {
 
         press(&mut ui, &mut app, KeyCode::Char('j'));
         assert!(matches!(rx.try_recv(), Ok(Req::Open { id, .. }) if id == "1"));
+        // Not before it has loaded (it may fail to).
+        assert!(rx.try_recv().is_err());
+        assert!(!ui.summary().unwrap().seen);
+        let opened = |id: &str| Ev::Opened {
+            address: "a@x.com".into(),
+            id: id.into(),
+            result: Ok(Box::new(Message {
+                id: id.into(),
+                ..Default::default()
+            })),
+        };
+        // The automatic preview's answer, now off screen, marks nothing.
+        ui.event(opened("2"));
+        assert!(rx.try_recv().is_err());
+        ui.event(opened("1"));
         assert!(matches!(rx.try_recv(), Ok(Req::MarkRead { id, .. }) if id == "1"));
         assert!(ui.summary().unwrap().seen);
-        // Only once.
+        // Only once; back on the cached "2", it is read at once.
         press(&mut ui, &mut app, KeyCode::Char('j'));
         assert!(rx.try_recv().is_err());
+        press(&mut ui, &mut app, KeyCode::Char('k'));
+        assert!(matches!(rx.try_recv(), Ok(Req::MarkRead { id, .. }) if id == "2"));
     }
 
     #[test]

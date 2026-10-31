@@ -325,7 +325,7 @@ class AppState {
         }
       }),
       on("opened", (p) => {
-        // Opened means read: the Rust side saved it for the CLI and TUI too.
+        // Opened means read: the Rust side saves it for the CLI and TUI too.
         if ("key" in p) {
           const s = this.mail[p.address]?.messages.find((m) => m.id === p.id);
           if (s) s.seen = true;
