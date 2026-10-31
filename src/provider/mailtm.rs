@@ -532,6 +532,9 @@ mod tests {
         // Without an account id there is no topic to follow.
         let bare = Inbox::new("mailtm", "x@maxxspace.com".into(), json!({"token":"jwt1"}));
         assert!(provider(&s).push(&bare).is_none());
+
+        // mail.gw has no Mercure hub, so no push (the settings screen says so).
+        assert!(MailTm::gw().push(&inbox).is_none());
     }
 
     #[test]

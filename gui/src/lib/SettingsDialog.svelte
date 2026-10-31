@@ -221,7 +221,7 @@
               <input type="checkbox" bind:checked={push} class="mt-0.5 accent-[var(--color-ink)]" />
               <span class="text-xs">
                 Live push where the provider has it
-                <span class="block text-2xs text-muted">mail.tm, mail.gw and DropMail deliver at once instead of at the next check.</span>
+                <span class="block text-2xs text-muted">mail.tm and DropMail deliver at once instead of at the next check.</span>
               </span>
             </label>
             {@render envNote("TMPMAIL_PUSH")}
