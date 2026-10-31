@@ -5061,6 +5061,8 @@ dependencies = [
  "chrono",
  "drag",
  "notify-rust",
+ "objc2-foundation",
+ "objc2-web-kit",
  "serde",
  "serde_json",
  "tauri",
@@ -5072,6 +5074,7 @@ dependencies = [
  "tempfile",
  "tmpmail",
  "toml_edit 0.25.15+spec-1.1.0",
+ "webkit2gtk",
  "zbus",
 ]
 

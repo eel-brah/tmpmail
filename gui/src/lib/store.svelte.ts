@@ -352,7 +352,11 @@ class AppState {
     const tick = window.setInterval(() => (this.now = Date.now()), 30000);
     return () => {
       window.clearInterval(tick);
-      void Promise.all(unlisten).then((fns) => fns.forEach((f) => f()));
+      // The page may not unlisten in Rust (see capabilities/main.json):
+      // this only drops the handlers here, and the refused call is ignored.
+      void Promise.all(unlisten).then((fns) =>
+        fns.forEach((f) => void Promise.resolve(f() as unknown).catch(() => {})),
+      );
     };
   }
 }

@@ -8,6 +8,14 @@
 //!
 //! What the script in the mail would do if it ran is observable from Rust:
 //! it requests `/probe/hit/<variant>-<signal>` URLs on the mail scheme.
+//!
+//! The script also attacks the caller check (`caller.rs`) the way a frame
+//! that knows Tauri's invoke key could: through the bridge if it has one, a
+//! direct `fetch` to the IPC protocol, and a forged `postMessage` call with
+//! a fake `Origin` header. The probe hands the frames the key (debug builds
+//! only), so this holds on engines that keep the bridge out of frames too.
+//! Every call the invoke handler sees from a frame is recorded, and the
+//! forged ones carry a `Tmpmail-Probe` header naming the frame.
 
 use std::collections::BTreeSet;
 use std::io::{Read, Write};
@@ -18,12 +26,13 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 use tauri::http::Response;
-use tauri::{AppHandle, Manager, State, Url};
+use tauri::ipc::InvokeMessage;
+use tauri::{AppHandle, Manager, Runtime, State, Url};
 use tmpmail::provider::{Attachment, Message};
 use tmpmail::render::{Frame, sanitize_mail_html};
 
 use crate::scheme::{self, html_response};
-use crate::{Mails, Shared};
+use crate::{Mails, Shared, caller};
 
 /// The answer of every image endpoint: a 1x1 PNG.
 const PNG: &[u8] = &[
@@ -48,9 +57,22 @@ const CONTROLS: &[(&str, bool, Option<&str>)] = &[
     // Scripts allowed in an opaque origin: shows the method works, and
     // whether Tauri's IPC reaches such a frame.
     ("raw_scripts", false, Some("allow-scripts allow-popups")),
-    // No layer at all (cross-origin frame, scripts on).
+    // No layer at all (cross-origin frame on the mail origin, scripts on):
+    // only the caller check stands between it and the commands.
     ("raw_open", false, None),
 ];
+
+/// A command call the invoke handler saw that didn't come from the app's
+/// page, or that carried the probe's forgery marker.
+#[derive(Clone, Debug)]
+struct Call {
+    command: String,
+    origin: Option<String>,
+    top: Option<String>,
+    /// The `Tmpmail-Probe` header: `<variant>-<route>` of a forged call.
+    marker: Option<String>,
+    accepted: bool,
+}
 
 pub struct Probe {
     requests: Mutex<Vec<String>>,
@@ -59,6 +81,9 @@ pub struct Probe {
     remote_base: Mutex<String>,
     init_calls: AtomicUsize,
     keys: Mutex<Vec<(String, u64)>>,
+    /// Tauri's invoke key, handed to the test mail (see the module docs).
+    invoke_key: Mutex<String>,
+    calls: Mutex<Vec<Call>>,
     wait: u64,
 }
 
@@ -72,6 +97,8 @@ impl Probe {
             remote_base: Mutex::default(),
             init_calls: AtomicUsize::new(0),
             keys: Mutex::default(),
+            invoke_key: Mutex::default(),
+            calls: Mutex::default(),
             wait: std::env::var("TMPMAIL_GUI_PROBE_WAIT")
                 .ok()
                 .and_then(|s| s.parse().ok())
@@ -85,6 +112,7 @@ impl Probe {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind the probe's image server");
         let port = listener.local_addr().expect("local addr").port();
         *self.remote_base.lock().unwrap() = format!("http://127.0.0.1:{port}");
+        *self.invoke_key.lock().unwrap() = app.invoke_key().to_string();
         let for_server = shared.clone();
         std::thread::spawn(move || {
             for stream in listener.incoming().flatten() {
@@ -137,6 +165,10 @@ impl Probe {
     fn hostile_html(&self, v: &str) -> String {
         let hit = format!("{}/probe/hit/{v}-", scheme::origin());
         let remote = format!("{}/{v}-remote.png", self.remote_base.lock().unwrap());
+        // As JS string literals.
+        let key = json!(*self.invoke_key.lock().unwrap()).to_string();
+        let ipc = ipc_base();
+        let refused = json!(caller::REFUSED).to_string();
         format!(
             r#"<style>.probe-block{{background-image:url({hit}style-block)}}</style>
 <h1>tmpmail preview probe</h1>
@@ -154,10 +186,42 @@ impl Probe {
   var t;
   try {{ t = window.__TAURI_INTERNALS__; h(t ? 'internals-present' : 'internals-absent'); }} catch (e) {{ h('internals-threw'); }}
   try {{ var p = window.parent.__TAURI_INTERNALS__; h(p ? 'parent-internals-readable' : 'parent-internals-undefined'); t = t || p; }} catch (e) {{ h('parent-blocked'); }}
+  function why(e) {{ return String(e).indexOf({refused}) >= 0 ? 'refused' : 'rejected'; }}
   try {{
-    if (t && t.invoke) {{ t.invoke('init').then(function () {{ h('invoke-ok'); }}, function () {{ h('invoke-rejected'); }}); }}
+    if (t && t.invoke) {{ t.invoke('init').then(function () {{ h('invoke-ok'); }}, function (e) {{ h('invoke-' + why(e)); }}); }}
     else {{ h('invoke-unavailable'); }}
   }} catch (e) {{ h('invoke-threw'); }}
+  // A direct call over the IPC protocol with the invoke key. The Origin
+  // set here is ignored by the engine (a forbidden header).
+  try {{
+    fetch('{ipc}init', {{ method: 'POST', body: '{{}}', headers: {{
+      'Content-Type': 'application/json', 'Tauri-Callback': '1', 'Tauri-Error': '2',
+      'Tauri-Invoke-Key': {key}, 'Origin': 'tauri://localhost', 'Tmpmail-Probe': '{v}-fetch' }} }})
+      .then(function (r) {{
+        if (r.headers.get('Tauri-Response') === 'ok') {{ h('fetch-ok'); return; }}
+        return r.text().then(function (b) {{ h('fetch-' + why(b)); }});
+      }}, function () {{ h('fetch-failed'); }});
+  }} catch (e) {{ h('fetch-threw'); }}
+  // The postMessage route, whose headers are the script's own: a forged
+  // Origin. Rust sees whether it arrives (it carries Tmpmail-Probe).
+  try {{
+    var msg = JSON.stringify({{ cmd: 'init', callback: 1, error: 2, payload: {{}},
+      options: {{ headers: {{ 'Origin': 'tauri://localhost', 'Tmpmail-Probe': '{v}-post' }} }},
+      __TAURI_INVOKE_KEY__: {key} }});
+    if (window.ipc && window.ipc.postMessage) {{ window.ipc.postMessage(msg); h('post-sent-ipc'); }}
+    else if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.ipc) {{ window.webkit.messageHandlers.ipc.postMessage(msg); h('post-sent-webkit'); }}
+    else if (window.chrome && window.chrome.webview) {{ window.chrome.webview.postMessage(msg); h('post-sent-webview2'); }}
+    else {{ h('post-unavailable'); }}
+  }} catch (e) {{ h('post-threw'); }}
+  // And through the bridge with fetch broken, which makes it fall back to
+  // postMessage with the headers given here.
+  try {{
+    if (t && t.invoke) {{
+      window.fetch = function () {{ return Promise.reject(new Error('blocked')); }};
+      t.invoke('init', {{}}, {{ headers: {{ 'Origin': 'tauri://localhost', 'Tmpmail-Probe': '{v}-fallback' }} }})
+        .then(function () {{ h('fallback-ok'); }}, function (e) {{ h('fallback-' + why(e)); }});
+    }}
+  }} catch (e) {{ h('fallback-threw'); }}
   try {{ var w = window.open('https://example.com/?tmpmail-probe={v}-window-open'); h(w ? 'window-open-returned' : 'window-open-null'); }} catch (e) {{ h('window-open-threw'); }}
   try {{ document.getElementById('blank').click(); h('link-click-done'); }} catch (e) {{ h('link-click-threw'); }}
 }})();
@@ -165,7 +229,34 @@ impl Probe {
         )
     }
 
-    /// What `init` returns in probe mode: the frames to show.
+    /// Records what the invoke handler decided about a call that didn't
+    /// come from the app's page, or that the probe forged.
+    pub fn observe<R: Runtime>(
+        &self,
+        message: &InvokeMessage<R>,
+        caller: &caller::Caller,
+        accepted: bool,
+    ) {
+        let marker = message
+            .headers()
+            .get("tmpmail-probe")
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_string);
+        if accepted && marker.is_none() {
+            return;
+        }
+        self.calls.lock().unwrap().push(Call {
+            command: message.command().to_string(),
+            origin: caller.origin.clone(),
+            top: caller.top.as_ref().map(Url::to_string),
+            marker,
+            accepted,
+        });
+    }
+
+    /// What `init` returns in probe mode: the frames to show. Only calls
+    /// the caller check let through get here, so this counts the app
+    /// page's calls alone.
     pub fn on_init(&self, _shared: &Shared) -> Value {
         self.init_calls.fetch_add(1, Ordering::SeqCst);
         let keys = self.keys.lock().unwrap().clone();
@@ -252,6 +343,50 @@ impl Probe {
                 .any(|r| r.starts_with(&format!("/mail/{key}/cid/")))
         });
         let remote_hit = |v: &str| remote.iter().any(|r| r.contains(&format!("{v}-remote")));
+        let calls = self.calls.lock().unwrap().clone();
+        let from = |v: &str| {
+            let prefix = format!("{v}-");
+            calls
+                .iter()
+                .filter(|c| c.marker.as_deref().is_some_and(|m| m.starts_with(&prefix)))
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        let accepted_signal = |v: &str| {
+            ["invoke-ok", "fetch-ok", "fallback-ok"]
+                .iter()
+                .any(|s| has(&format!("{v}-{s}")))
+        };
+        // The mail origin, as the engine reports it in `Origin`.
+        let mail_origin = scheme::origin();
+        let open_calls = from("raw_open");
+        // Only raw_open runs scripts on the mail origin. Its direct fetch
+        // reaches the handler on every engine; on WebView2 its bridge call
+        // does too.
+        let ipc_rejected_from_mail_origin = !accepted_signal("raw_open")
+            && open_calls.iter().all(|c| !c.accepted)
+            && calls
+                .iter()
+                .any(|c| !c.accepted && c.origin.as_deref() == Some(mail_origin));
+        let real_no_ipc = REAL.iter().all(|v| {
+            from(v).is_empty()
+                && !accepted_signal(v)
+                && !has(&format!("{v}-internals-present"))
+                && !has(&format!("{v}-parent-internals-readable"))
+        });
+        let control = |v: &str| {
+            let calls = from(v);
+            json!({
+                "internals": if has(&format!("{v}-internals-present")) { "present" } else if has(&format!("{v}-internals-absent")) { "absent" } else { "unknown" },
+                "signals": signals(v),
+                "calls_reaching_handler": calls.iter().map(|c| json!({
+                    "route": c.marker.as_deref().and_then(|m| m.strip_prefix(&format!("{v}-"))),
+                    "command": c.command,
+                    "origin": c.origin,
+                    "accepted": c.accepted,
+                })).collect::<Vec<_>>(),
+            })
+        };
 
         // The sanitizer on its own: the frames above can't tell it from the
         // CSP, which blocks the probe's http "remote" image either way.
@@ -285,8 +420,9 @@ impl Probe {
             "csp_header_alone_blocks_remote_image": !remote_hit("raw_csp"),
             "sandbox_alone_blocks_scripts": !ran("raw_sandbox"),
             "control_scripts_ran": has("raw_scripts-script-ran"),
-            "internals_absent_in_sandboxed_frame": has("raw_scripts-internals-absent") && !has("raw_scripts-invoke-ok"),
-            "no_invoke_from_any_frame": !hits.iter().any(|h| h.ends_with("-invoke-ok")),
+            "real_frames_no_internals_no_ipc": real_no_ipc,
+            "ipc_rejected_from_mail_origin": ipc_rejected_from_mail_origin,
+            "forged_calls_refused": calls.iter().all(|c| !c.accepted),
             "init_called_once": self.init_calls.load(Ordering::SeqCst) == 1,
             "remote_image_not_loaded": REAL.iter().all(|v| !remote_hit(v)),
             "sanitizer_drops_remote_images": !sanitized.contains(&remote_base) && https_dropped,
@@ -319,6 +455,17 @@ impl Probe {
                 "inline_style_block_applies_under_csp_header": has("raw_csp-style-block"),
                 "inline_style_attr_applies_in_real_frame": has("real_images-style-attr"),
                 "internals_in_unsandboxed_frame": if has("raw_open-internals-present") { "present" } else if has("raw_open-internals-absent") { "absent" } else { "unknown" },
+                "controls": {
+                    "raw_scripts": control("raw_scripts"),
+                    "raw_open": control("raw_open"),
+                },
+                "refused_calls": calls.iter().filter(|c| !c.accepted).map(|c| json!({
+                    "command": c.command,
+                    "origin": c.origin,
+                    "top": c.top,
+                    "marker": c.marker,
+                })).collect::<Vec<_>>(),
+                "forged_calls_accepted": calls.iter().filter(|c| c.accepted).filter_map(|c| c.marker.clone()).collect::<Vec<_>>(),
                 "popups_reaching_on_new_window": popups,
                 "webview_windows": windows,
             },
@@ -326,6 +473,16 @@ impl Probe {
             "requests": requests,
             "remote_requests": remote,
         })
+    }
+}
+
+/// Where Tauri's IPC protocol is served, as `convertFileSrc(cmd, 'ipc')`
+/// builds it.
+fn ipc_base() -> &'static str {
+    if cfg!(windows) {
+        "http://ipc.localhost/"
+    } else {
+        "ipc://localhost/"
     }
 }
 

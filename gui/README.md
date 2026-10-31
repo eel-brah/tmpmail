@@ -179,11 +179,21 @@ header only, sandbox only, scripts allowed, nothing). Anything that runs request
 the mail scheme, which Rust records. It also checks the sanitizer and the document builder
 directly (remote images dropped with images off, `http:` images dropped and `https:` kept
 with them on, a `style` keeping its colors but losing its `url(...)`, the dark document
-inverted), since the frames can't tell the sanitizer's work from the CSP's. It prints a JSON
-report and exits 0 when every check held (20 checks). `TMPMAIL_GUI_PROBE_WAIT=20` keeps the
+inverted), since the frames can't tell the sanitizer's work from the CSP's. The test mail
+also attacks the command caller check as a frame that knows Tauri's invoke key would (the
+probe hands it the key): through the bridge where the engine gives frames one, a direct
+`fetch` to the IPC protocol, and a `postMessage` call with a forged `Origin`. Every call
+that reaches the invoke handler from a frame is recorded. Strict checks: the real frames
+ran no code, had no bridge and made no call; the unsandboxed control on the mail origin
+(`raw_open`) was refused by the caller check on every engine; no forged call was accepted;
+`init` ran once (only the app page's calls get that far). What the controls' frames had
+(bridge or not, which calls got through to the handler) is reported under
+`observations.controls`, since the controls drop layers on purpose. It prints a JSON report
+and exits 0 when every check held (21 checks). `TMPMAIL_GUI_PROBE_WAIT=20` keeps the
 window open 20 s more so you can click the test links: popups that reach the app are listed
 under `popups_reaching_on_new_window` (and are not opened). The `gui` workflow runs the probe
-on Linux, macOS and Windows.
+on Linux, macOS and Windows (stderr goes to `probe.log`, and the job fails unless
+`probe.json` parses and says `"pass": true`).
 
 ## Security model
 
@@ -201,15 +211,49 @@ on Linux, macOS and Windows.
 4. Links get `target="_blank"`; the app denies every new window and opens only http, https
    and mailto links in the system browser, from Rust. The link list's Open does the same
    for http and https.
-5. Privileged work happens in Rust commands: the clipboard (`tauri-plugin-clipboard-manager`),
+5. **Commands accept calls only from the app's page** (`src-tauri/src/caller.rs`, run by
+   the invoke handler before any command, so none can skip it). WebView2 injects Tauri's
+   bridge (`__TAURI_INTERNALS__`, with the invoke key) into **every frame**, and the mail
+   scheme's origin counts as app-local, so without this an unsandboxed frame on the mail
+   origin could call every command: in CI (2026-10-31, WebView2 155) such a control frame
+   called `init` and it ran. WebKitGTK and WKWebView keep the bridge in the main frame.
+   The check needs all of:
+   - the main window's webview;
+   - its top-level URL, read from the engine, is the app's page;
+   - the call's `Origin` header is `tauri://localhost` or `http(s)://tauri.localhost`
+     (plus the Vite dev server in debug builds). Calls come over Tauri's IPC protocol, where
+     the engine sets `Origin` to the calling frame's origin and no script can change it.
+
+   Tauri's other route, the `postMessage` fallback, takes "headers" from the script, so a
+   forged `Origin` would pass there: the probe showed that on WebKitGTK any frame, sandboxed
+   or not, can post to it (WebKit keeps only the key out of frames). The app removes that
+   route at startup on WebKitGTK and WKWebView (wry's `ipc` script message handler) and
+   won't start if it can't. On WebView2 only the top-level document can post (frames don't
+   reach `CoreWebView2.WebMessageReceived`), and the top-level URL check covers it; web
+   messages are also turned off there, but WebView2 applies that from the next document on.
+   The cost: if one of the page's IPC `fetch`es ever failed, Tauri's JS would switch to the
+   closed route for good and calls would hang until the window reloads.
+
+   Tauri 2.12 has no way to keep its init scripts out of subframes on WebView2 (wry adds
+   them to every frame there), so frames on Windows still see the bridge; the check makes it
+   useless. Plugin commands don't go through the app's invoke handler: the page may only
+   *listen* to events (`core:event:allow-listen`). Unlisten is not allowed, since a frame
+   with the bridge could remove the app's listeners (their ids are sequential); events reach
+   only the top-level document, so a frame that listens gets nothing.
+
+   Which layer stops what, for mail content: ammonia removes scripts and handlers; the
+   scheme's CSP header blocks any that slip through; the sandbox (no `allow-scripts`, an
+   opaque origin) blocks them again and makes any IPC call come from `null`; and if all of
+   that failed, the caller check refuses every command from a frame.
+6. Privileged work happens in Rust commands: the clipboard (`tauri-plugin-clipboard-manager`),
    the save dialog (`tauri-plugin-dialog`, then `std::fs::write` to a new file under a
    sanitized name), the opener, notifications (`tauri-plugin-notification`), the tray and
    dragging files out. The page has **no** plugin permission, only the app's
    own commands, each listed in `capabilities/main.json` and `build.rs`
    (`AppManifest::commands`).
-6. Commands check their input: an address must be a stored inbox, a message key one the app
+7. Commands check their input: an address must be a stored inbox, a message key one the app
    opened, a link or attachment index one of that message's; usernames, domains, labels and
    ids are checked for shape. Copying takes what to copy (the code, the sender, link N), not
    arbitrary text. Settings are checked field by field in Rust before anything is written.
-7. The shell has a strict CSP, `freezePrototype`, no global Tauri object, no asset protocol,
+8. The shell has a strict CSP, `freezePrototype`, no global Tauri object, no asset protocol,
    and one capability.

@@ -7,6 +7,7 @@
 // No console window on Windows release builds.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod caller;
 mod commands;
 mod drag;
 mod notify;
@@ -31,6 +32,9 @@ use tmpmail::provider::Message;
 use tmpmail::render::body_text;
 
 use crate::worker::Req;
+
+/// The generated command handler, before the caller check wraps it.
+type Handler = Box<dyn Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + Sync>;
 
 /// How many opened messages the scheme can still serve.
 const KEEP_MAILS: usize = 32;
@@ -129,17 +133,15 @@ impl Mails {
 /// Only the app's own pages may load in the main webview. (`Url::origin`
 /// is opaque for custom schemes, so scheme and host are compared.)
 fn app_page(url: &Url) -> bool {
+    if caller::app_page(url) {
+        return true;
+    }
+    // The mail frame's own loads, on engines that report them here
+    // (WebView2 maps the scheme to http).
     let host = url.host_str().unwrap_or_default();
     match url.scheme() {
-        "tauri" => host == "localhost",
-        "http" | "https" if host == "tauri.localhost" => true,
-        // The mail frame's own loads, on engines that report them here
-        // (WebView2 maps the scheme to http), and Vite in debug builds.
         scheme::SCHEME => host == "localhost",
-        "http" => {
-            host == "tmpmail-mail.localhost"
-                || cfg!(debug_assertions) && host == "localhost" && url.port() == Some(1420)
-        }
+        "http" => host == "tmpmail-mail.localhost",
         _ => false,
     }
 }
@@ -220,7 +222,7 @@ fn main() {
             scheme::handle(ctx.app_handle(), &for_scheme, req, responder)
         });
     #[cfg(debug_assertions)]
-    let builder = builder.invoke_handler(tauri::generate_handler![
+    let commands: Handler = Box::new(tauri::generate_handler![
         commands::init,
         commands::domains,
         commands::create_inbox,
@@ -241,7 +243,7 @@ fn main() {
         probe::probe_finish
     ]);
     #[cfg(not(debug_assertions))]
-    let builder = builder.invoke_handler(tauri::generate_handler![
+    let commands: Handler = Box::new(tauri::generate_handler![
         commands::init,
         commands::domains,
         commands::create_inbox,
@@ -260,6 +262,23 @@ fn main() {
         commands::prepare_attachment,
         commands::drag_attachment
     ]);
+
+    // Every call passes the caller check first: only the app's page in the
+    // main window may run a command (see caller.rs).
+    #[cfg(debug_assertions)]
+    let for_check = shared.clone();
+    let builder = builder.invoke_handler(move |invoke| {
+        let (_caller, verdict) = caller::check(&invoke.message);
+        #[cfg(debug_assertions)]
+        if let Some(p) = &for_check.probe {
+            p.observe(&invoke.message, &_caller, verdict.is_ok());
+        }
+        if let Err(e) = verdict {
+            invoke.resolver.reject(e);
+            return true;
+        }
+        commands(invoke)
+    });
 
     let for_exit = shared.clone();
     let result = builder
@@ -292,31 +311,36 @@ fn main() {
 
             let handle = app.handle().clone();
             let for_popups = shared.clone();
-            WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
-                .title("tmpmail")
-                .visible(!hidden)
-                .inner_size(1240.0, 780.0)
-                .min_inner_size(900.0, 560.0)
-                .on_navigation(|url| {
-                    let ok = app_page(url);
-                    if std::env::var_os("TMPMAIL_GUI_LOG").is_some() {
-                        eprintln!(
-                            "navigation {url}: {}",
-                            if ok { "allowed" } else { "blocked" }
-                        );
-                    }
-                    ok
-                })
-                .on_page_load(|_, payload| {
-                    if std::env::var_os("TMPMAIL_GUI_LOG").is_some() {
-                        eprintln!("page {:?}: {}", payload.event(), payload.url());
-                    }
-                })
-                .on_new_window(move |url, _features| {
-                    popup(&handle, &for_popups, &url);
-                    NewWindowResponse::Deny
-                })
-                .build()?;
+            let window =
+                WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
+                    .title("tmpmail")
+                    .visible(!hidden)
+                    .inner_size(1240.0, 780.0)
+                    .min_inner_size(900.0, 560.0)
+                    .on_navigation(|url| {
+                        let ok = app_page(url);
+                        if std::env::var_os("TMPMAIL_GUI_LOG").is_some() {
+                            eprintln!(
+                                "navigation {url}: {}",
+                                if ok { "allowed" } else { "blocked" }
+                            );
+                        }
+                        ok
+                    })
+                    .on_page_load(|_, payload| {
+                        if std::env::var_os("TMPMAIL_GUI_LOG").is_some() {
+                            eprintln!("page {:?}: {}", payload.event(), payload.url());
+                        }
+                    })
+                    .on_new_window(move |url, _features| {
+                        popup(&handle, &for_popups, &url);
+                        NewWindowResponse::Deny
+                    })
+                    .build()?;
+            // Calls must come over the IPC protocol, where the engine sets
+            // their Origin (caller.rs). The app doesn't start without that.
+            caller::close_post_message(&window)
+                .map_err(|e| format!("could not secure the window's IPC: {e}"))?;
             Ok(())
         })
         .build(tauri::generate_context!())
