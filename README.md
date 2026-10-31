@@ -54,7 +54,7 @@ Nothing else is needed at runtime. Optional extras: `wl-copy`, `xclip`, `xsel` o
 for `copy` (Windows has `clip.exe`), a browser for `read --html` (found through `xdg-open`,
 `open`, or Explorer on Windows), `notify-send` for `watch --notify` (macOS uses `osascript`,
 Windows a PowerShell toast), and `less` for long messages (without it, Windows prints them).
-CI runs the tests on Linux, macOS and Windows.
+Colors work in the classic `cmd.exe` console too (Windows 10 and later). CI runs the tests on Linux, macOS and Windows.
 
 Rather have a window? The [desktop app](#desktop-app-preview) is in preview.
 

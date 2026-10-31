@@ -87,16 +87,29 @@ pub struct InboxView<'a> {
     private: bool,
 }
 
+/// Whether output gets colors: not asked to go without, a terminal on
+/// stdout, and one that shows them (`ansi`, asked last: on Windows it turns
+/// the console's escape-code processing on).
+fn wants_color(global: &Global, no_color_env: bool, terminal: bool, ansi: fn() -> bool) -> bool {
+    !global.no_color && !global.json && !no_color_env && terminal && ansi()
+}
+
 impl App {
     pub fn new(global: Global) -> Result<Self> {
         let config = Config::load()?;
         crate::http::set_timeout(config.http_timeout);
         let store = Store::new(Store::default_dir());
         let state = store.load()?;
-        let color = !global.no_color
-            && !global.json
-            && std::env::var_os("NO_COLOR").is_none()
-            && std::io::stdout().is_terminal();
+        let color = wants_color(
+            &global,
+            std::env::var_os("NO_COLOR").is_some(),
+            std::io::stdout().is_terminal(),
+            #[cfg(feature = "cli")]
+            system::ansi_colors,
+            // The desktop app prints no colored output.
+            #[cfg(not(feature = "cli"))]
+            || false,
+        );
         let app = App {
             global,
             config,
@@ -222,7 +235,13 @@ impl App {
         if let Some(log) = &self.log {
             let _ = log.send(clean_line(msg));
         } else if !self.global.quiet && !self.global.json {
-            eprintln!("{}", self.dim(&clean(msg)));
+            // Colors are decided for stdout; stderr may go elsewhere.
+            let msg = clean(msg);
+            if std::io::stderr().is_terminal() {
+                eprintln!("{}", self.dim(&msg));
+            } else {
+                eprintln!("{msg}");
+            }
         }
     }
 
@@ -623,6 +642,35 @@ pub(crate) fn relative(t: DateTime<Utc>) -> String {
 mod tests {
     use super::*;
     use serde_json::Value;
+
+    #[test]
+    fn colors_need_a_terminal_that_shows_them() {
+        fn yes() -> bool {
+            true
+        }
+        fn no() -> bool {
+            false
+        }
+        fn unasked() -> bool {
+            panic!("the console is only set up for a terminal")
+        }
+        let plain = Global::default();
+        assert!(wants_color(&plain, false, true, yes));
+        // Escape-code processing couldn't be turned on (a Windows console).
+        assert!(!wants_color(&plain, false, true, no));
+        assert!(!wants_color(&plain, false, false, unasked));
+        assert!(!wants_color(&plain, true, true, yes));
+        let no_color = Global {
+            no_color: true,
+            ..Global::default()
+        };
+        assert!(!wants_color(&no_color, false, true, unasked));
+        let json = Global {
+            json: true,
+            ..Global::default()
+        };
+        assert!(!wants_color(&json, false, true, unasked));
+    }
 
     #[cfg(feature = "cli")]
     #[test]

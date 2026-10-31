@@ -72,13 +72,14 @@ pub fn clipboard_command(custom: Option<&str>) -> anyhow::Result<String> {
 pub fn copy(text: &str, custom: Option<&str>) -> anyhow::Result<()> {
     let cmd = clipboard_command(custom)?;
     let (prog, args) = split_cmd(&cmd)?;
-    let mut child = Command::new(&prog)
-        .args(&args)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .with_context(|| format!("cannot run {prog}"))?;
+    let mut child = spawn(
+        Command::new(&prog)
+            .args(&args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null()),
+    )
+    .with_context(|| format!("cannot run {prog}"))?;
     child
         .stdin
         .take()
@@ -119,15 +120,17 @@ pub fn open(target: &str, browser: Option<&str>) -> anyhow::Result<()> {
     let mut command = Command::new(&prog);
     command.args(&args).arg(target);
     if interactive {
-        command
-            .status()
+        spawn(&mut command)
+            .and_then(|mut child| child.wait())
             .with_context(|| format!("cannot run {prog}"))?;
     } else {
-        command
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .with_context(|| format!("cannot run {prog}"))?;
+        spawn(
+            command
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null()),
+        )
+        .with_context(|| format!("cannot run {prog}"))?;
     }
     Ok(())
 }
@@ -139,14 +142,127 @@ pub fn open(target: &str, browser: Option<&str>) -> anyhow::Result<()> {
 #[cfg(windows)]
 fn windows_open(target: &str) -> anyhow::Result<()> {
     use std::os::windows::process::CommandExt;
-    Command::new("explorer.exe")
+    let mut command = Command::new("explorer.exe");
+    command
         .raw_arg(explorer_arg(target)?)
+        .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .context("cannot run explorer.exe")?;
+        .stderr(Stdio::null());
+    spawn(&mut command).context("cannot run explorer.exe")?;
     // Explorer exits with 1 even when it worked, so the status means nothing.
     Ok(())
+}
+
+/// Starts `command`. On Windows a child gets every inheritable handle of
+/// this process, not only the three it is given, so a browser or Explorer
+/// would keep a file that `read --html > out` writes to open (Explorer for a
+/// moment, a browser for its whole session) and the next write to it fails.
+/// There, this process's own standard handles are made non-inheritable while
+/// the child starts; the child still gets its own standard handles, which
+/// Rust passes as duplicates.
+fn spawn(command: &mut Command) -> std::io::Result<std::process::Child> {
+    #[cfg(windows)]
+    {
+        let _guard = NoInheritedStdHandles::new();
+        command.spawn()
+    }
+    #[cfg(not(windows))]
+    command.spawn()
+}
+
+/// Clears the inherit flag of this process's standard handles until
+/// dropped (on unwind too). Holds a lock, so a spawn on another thread
+/// can't put the flags back while this one starts its child.
+#[cfg(windows)]
+struct NoInheritedStdHandles {
+    cleared: [windows_sys::Win32::Foundation::HANDLE; 3],
+    _lock: std::sync::MutexGuard<'static, ()>,
+}
+
+#[cfg(windows)]
+impl NoInheritedStdHandles {
+    fn new() -> Self {
+        use windows_sys::Win32::Foundation::{
+            GetHandleInformation, HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE, SetHandleInformation,
+        };
+        use windows_sys::Win32::System::Console::{
+            GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
+        };
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let lock = LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut cleared = [std::ptr::null_mut(); 3];
+        for (slot, id) in
+            cleared
+                .iter_mut()
+                .zip([STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE])
+        {
+            // SAFETY: reads and changes only the inherit flag of this
+            // process's own standard handles; nothing is closed or replaced.
+            unsafe {
+                let handle = GetStdHandle(id);
+                if handle.is_null() || handle == INVALID_HANDLE_VALUE {
+                    continue;
+                }
+                let mut flags = 0u32;
+                if GetHandleInformation(handle, &mut flags) != 0
+                    && flags & HANDLE_FLAG_INHERIT != 0
+                    && SetHandleInformation(handle, HANDLE_FLAG_INHERIT, 0) != 0
+                {
+                    *slot = handle;
+                }
+            }
+        }
+        NoInheritedStdHandles {
+            cleared,
+            _lock: lock,
+        }
+    }
+}
+
+#[cfg(windows)]
+impl Drop for NoInheritedStdHandles {
+    fn drop(&mut self) {
+        use windows_sys::Win32::Foundation::{HANDLE_FLAG_INHERIT, SetHandleInformation};
+        for handle in self.cleared.into_iter().filter(|h| !h.is_null()) {
+            // SAFETY: puts back the flag `new` cleared on this handle.
+            unsafe {
+                SetHandleInformation(handle, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT);
+            }
+        }
+    }
+}
+
+/// Whether stdout shows ANSI colors. A Windows console only does once
+/// virtual terminal processing is on (the classic conhost has it off): it is
+/// turned on here, and colors stay off when that fails. A terminal that
+/// isn't a console (mintty's pipes) passes the codes through as is.
+#[cfg(windows)]
+pub fn ansi_colors() -> bool {
+    use windows_sys::Win32::System::Console::{
+        ENABLE_VIRTUAL_TERMINAL_PROCESSING, GetConsoleMode, GetStdHandle, STD_OUTPUT_HANDLE,
+        SetConsoleMode,
+    };
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        // SAFETY: console mode calls on this process's stdout handle.
+        unsafe {
+            let out = GetStdHandle(STD_OUTPUT_HANDLE);
+            let mut mode = 0u32;
+            if GetConsoleMode(out, &mut mode) == 0 {
+                return true;
+            }
+            mode & ENABLE_VIRTUAL_TERMINAL_PROCESSING != 0
+                || SetConsoleMode(out, mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING) != 0
+        }
+    })
+}
+
+/// Terminals elsewhere take ANSI colors as they are.
+#[cfg(not(windows))]
+pub fn ansi_colors() -> bool {
+    true
 }
 
 /// Explorer's argument, always quoted so commas and spaces stay part of the
@@ -231,10 +347,12 @@ pub fn notify(title: &str, body: &str) {
     } else {
         // Don't wait: PowerShell takes a second or so to start.
         #[cfg(windows)]
-        let _ = windows_notify_command(title, body)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn();
+        let _ = spawn(
+            windows_notify_command(title, body)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null()),
+        );
     }
 }
 

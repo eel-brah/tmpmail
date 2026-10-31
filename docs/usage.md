@@ -48,8 +48,8 @@ ignore case. Plain words work: `--from github` matches `GitHub <noreply@github.c
 | `--json` | | Print machine-readable JSON instead of text (format in [json.md](json.md)). Errors become `{"error":{"kind","message"}}`. |
 | `--inbox ADDR` | `-i` | Act on this inbox instead of the active one. Example: `tmpmail -i github ls`. Also settable with `TMPMAIL_INBOX`. |
 | `--quiet` | `-q` | Print only the essential result, without hints or status lines. Example: `addr=$(tmpmail new -q)`. |
-| `--no-color` | | No bold or dim text. Colors are also off when output is piped or `NO_COLOR` is set. |
-| `--browser CMD` | `-b` | Program used by `read --html` and `links --open`, e.g. `-b firefox` or `-b w3m`. Default: `$BROWSER`, then the system opener: `xdg-open` (Linux), `open` (macOS), `wslview` (WSL), or Explorer's default handler on Windows. |
+| `--no-color` | | No bold or dim text. Colors are also off when output is piped or `NO_COLOR` is set. In a Windows console, tmpmail turns on its escape-code processing (off in the classic `cmd.exe` window) and prints without colors if it can't. |
+| `--browser CMD` | `-b` | Program used by `read --html` and `links --open`, e.g. `-b firefox` or `-b w3m`. Default: `$BROWSER`, then the system opener: `xdg-open` (Linux), `open` (macOS), `wslview` (WSL), or Explorer's default handler on Windows (started without tmpmail's own handles, so a file its output is redirected to stays free). |
 | `--clipboard-cmd CMD` | | Program that receives the address on stdin for `copy` and `--copy`. Default: auto-detects `wl-copy` (Wayland), `xclip`/`xsel` (X11), `pbcopy` (macOS), `clip.exe` (Windows, WSL), `termux-clipboard-set` (Termux). |
 | `--help` | `-h` | Help for tmpmail or for one command (`tmpmail wait -h`). |
 | `--version` | `-V` | Print the version. |
