@@ -9,7 +9,7 @@ get the verification code back in one line of shell. When one provider is down, 
 [![CI](https://github.com/qorvyx/tmpmail/actions/workflows/ci.yml/badge.svg)](https://github.com/qorvyx/tmpmail/actions/workflows/ci.yml)
 [![Providers](https://github.com/qorvyx/tmpmail/actions/workflows/providers.yml/badge.svg)](https://github.com/qorvyx/tmpmail/actions/workflows/providers.yml)
 [![Release](https://img.shields.io/github/v/release/qorvyx/tmpmail)](https://github.com/qorvyx/tmpmail/releases/latest)
-[![crates.io](https://img.shields.io/badge/crates.io-v0.2.0-orange)](https://crates.io/crates/tmpmail)
+[![crates.io](https://img.shields.io/badge/crates.io-v0.3.0-orange)](https://crates.io/crates/tmpmail)
 [![License: GPL-3.0-or-later](https://img.shields.io/badge/license-GPL--3.0--or--later-blue)](LICENSE)
 
 ```sh
@@ -46,7 +46,7 @@ release has `SHA256SUMS`, and every file carries a GitHub build attestation that
 was built from this repository by the release workflow:
 
 ```sh
-gh attestation verify tmpmail-0.2.0-x86_64-unknown-linux-musl.tar.gz --repo qorvyx/tmpmail
+gh attestation verify tmpmail-0.3.0-x86_64-unknown-linux-musl.tar.gz --repo qorvyx/tmpmail
 ```
 
 Nothing else is needed at runtime. Optional extras: `wl-copy`, `xclip`, `xsel` or `pbcopy`
@@ -78,8 +78,8 @@ tmpmail --json ls | jq -r '.messages[0].subject'
 - name: Install tmpmail
   run: |
     mkdir -p ~/.local/bin
-    curl -sSfL https://github.com/qorvyx/tmpmail/releases/download/v0.2.0/tmpmail-0.2.0-x86_64-unknown-linux-musl.tar.gz \
-      | tar xz --strip-components=1 -C ~/.local/bin tmpmail-0.2.0-x86_64-unknown-linux-musl/tmpmail
+    curl -sSfL https://github.com/qorvyx/tmpmail/releases/download/v0.3.0/tmpmail-0.3.0-x86_64-unknown-linux-musl.tar.gz \
+      | tar xz --strip-components=1 -C ~/.local/bin tmpmail-0.3.0-x86_64-unknown-linux-musl/tmpmail
     echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
 - name: Sign-up test
@@ -405,7 +405,7 @@ cargo clippy --all-targets
 vhs assets/demo/demo.tape   # re-record the demo (needs vhs, and outbound SMTP for the test mail)
 ```
 
-The crate is also a library: `tmpmail = { version = "0.2", default-features = false }`
+The crate is also a library: `tmpmail = { version = "0.3", default-features = false }`
 gives the providers, stored inboxes, watcher and mail sanitizing (`tmpmail::provider`,
 `tmpmail::store`, `tmpmail::watcher`, ...) without the CLI's dependencies. Its API isn't
 stable yet.
