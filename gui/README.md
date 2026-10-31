@@ -54,11 +54,10 @@ preview on `gui-v*` tags; install steps are in the [main README](../README.md#de
   front instead of only flashing its taskbar entry. The token is taken only from the server
   that showed the notification, only as printable ASCII of at most 512 bytes, and used
   once; without one (an older server) the window is raised as before. The `default`
-  action (a click on the notification) is labeled "Open": KDE's notification history shows
-  it as a button (Plasma's own label "View" when the app gives none), since a click on a
-  history entry's body does nothing there; GNOME doesn't show it, and servers that list
-  every action (dunst's menu, for one) list "Open". The notifications
-  are sent as `tmpmail`, with the `desktop-entry` hint `tmpmail` (the installed
+  action (a click on the notification) is labeled "Open", for servers that list actions
+  (such as dunst's menu; not tested). KDE's notification history shows it as a button with
+  Plasma's own label, "View" (seen on Plasma 6.6), and a click on a history entry's text
+  does nothing there, so use that button; GNOME doesn't show it. The notifications are sent as `tmpmail`, with the `desktop-entry` hint `tmpmail` (the installed
   `tmpmail.desktop`), so KDE and GNOME label them "tmpmail" with its icon and file them
   under the app's own notification settings (0.1.1 sent the binary's name, `tmpmail-gui`;
   the desktop file has `X-GNOME-UsesNotifications=true`, so GNOME lists the app there before

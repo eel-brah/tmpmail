@@ -55,8 +55,9 @@ pub struct Request {
     pub summary: String,
     pub body: String,
     /// Pairs of action id and label: `default` is a click on the
-    /// notification. Its label shows where a server makes it a button: KDE's
-    /// notification history ("View" without one); GNOME doesn't show it.
+    /// notification. Its label shows only where a server lists actions
+    /// (dunst's menu, for one); Plasma 6.6's history shows its own "View"
+    /// button for it, and GNOME doesn't show it.
     pub actions: Vec<&'static str>,
     pub hints: Vec<(&'static str, &'static str)>,
     /// -1: the server's default.
@@ -215,7 +216,7 @@ impl Notifier {
                 None
             }
             // `default` is a click on the popup's body, or on KDE history's
-            // "Open" button; there are no other actions.
+            // "View" button; there are no other actions.
             Signal::Action(_, action) if action == "default" => {
                 Some((entry.target.clone(), entry.token.take()))
             }
