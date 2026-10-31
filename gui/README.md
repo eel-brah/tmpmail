@@ -193,8 +193,10 @@ ran no code, had no bridge and made no call; the unsandboxed control on the mail
 and exits 0 when every check held (21 checks). `TMPMAIL_GUI_PROBE_WAIT=20` keeps the
 window open 20 s more so you can click the test links: popups that reach the app are listed
 under `popups_reaching_on_new_window` (and are not opened). The `gui` workflow runs the probe
-on Linux, macOS and Windows (stderr goes to `probe.log`, and the job fails unless
-`probe.json` parses and says `"pass": true`).
+on Linux, macOS and Windows: with `TMPMAIL_GUI_PROBE_REPORT=probe.json` the report goes to
+that file instead of stdout (GLib prints some messages to stdout), the app's output goes
+to `probe.log`, both are uploaded, and the job fails unless `probe.json` parses and says
+`"pass": true`.
 
 ## Security model
 

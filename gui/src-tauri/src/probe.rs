@@ -2,7 +2,8 @@
 //! `TMPMAIL_GUI_PROBE=1` the window renders a hostile test mail through the
 //! real preview path (and through control frames that each drop one layer),
 //! every request to the mail scheme is recorded, and once the frames have
-//! loaded the result is printed to stdout as JSON and the app exits: 0 when
+//! loaded the result is printed to stdout as JSON (or written to the file
+//! `TMPMAIL_GUI_PROBE_REPORT` names) and the app exits: 0 when
 //! every check held, 1 otherwise. `TMPMAIL_GUI_PROBE_WAIT=SECS` keeps the
 //! window open that long first, so a person can click the test links.
 //!
@@ -84,6 +85,9 @@ pub struct Probe {
     /// Tauri's invoke key, handed to the test mail (see the module docs).
     invoke_key: Mutex<String>,
     calls: Mutex<Vec<Call>>,
+    /// Whether the report is out (or being written): the first of the
+    /// window and the watchdog wins.
+    reported: Mutex<bool>,
     wait: u64,
 }
 
@@ -99,6 +103,7 @@ impl Probe {
             keys: Mutex::default(),
             invoke_key: Mutex::default(),
             calls: Mutex::default(),
+            reported: Mutex::new(false),
             wait: std::env::var("TMPMAIL_GUI_PROBE_WAIT")
                 .ok()
                 .and_then(|s| s.parse().ok())
@@ -136,8 +141,9 @@ impl Probe {
             let mut result = probe.result(&app);
             result["timeout"] = json!(true);
             result["pass"] = json!(false);
-            println!("{}", serde_json::to_string_pretty(&result).unwrap());
-            std::process::exit(1);
+            if probe.report(&result) {
+                std::process::exit(1);
+            }
         });
     }
 
@@ -252,6 +258,37 @@ impl Probe {
             marker,
             accepted,
         });
+    }
+
+    /// Writes the report, once: to `TMPMAIL_GUI_PROBE_REPORT` when that is
+    /// set (GLib prints some of its messages to stdout, so CI reads the
+    /// file; written to a temporary file and renamed), else to stdout.
+    /// Returns false if it was already out. The lock is held until the file
+    /// is in place, so the watchdog's exit can't cut a write short.
+    fn report(&self, result: &Value) -> bool {
+        let mut reported = self.reported.lock().unwrap();
+        if *reported {
+            return false;
+        }
+        *reported = true;
+        let text = format!("{}\n", serde_json::to_string_pretty(result).unwrap());
+        match std::env::var_os("TMPMAIL_GUI_PROBE_REPORT").filter(|p| !p.is_empty()) {
+            Some(path) => {
+                let path = std::path::PathBuf::from(path);
+                let tmp = path.with_extension("json.tmp");
+                if let Err(e) =
+                    std::fs::write(&tmp, &text).and_then(|()| std::fs::rename(&tmp, &path))
+                {
+                    eprintln!(
+                        "tmpmail-gui: could not write the probe report to {}: {e}",
+                        path.display()
+                    );
+                    print!("{text}");
+                }
+            }
+            None => print!("{text}"),
+        }
+        true
     }
 
     /// What `init` returns in probe mode: the frames to show. Only calls
@@ -527,7 +564,9 @@ pub fn probe_finish(app: AppHandle, shared: State<'_, Arc<Shared>>) {
         return;
     };
     let result = probe.result(&app);
-    println!("{}", serde_json::to_string_pretty(&result).unwrap());
+    if !probe.report(&result) {
+        return;
+    }
     let code = if result["pass"] == json!(true) { 0 } else { 1 };
     app.exit(code);
 }

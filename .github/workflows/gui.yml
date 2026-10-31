@@ -45,26 +45,30 @@ jobs:
       - name: Build the app (debug, with the probe)
         working-directory: gui
         run: pnpm tauri build --debug --no-bundle
-      # The report is the app's stdout alone: GTK and WebKit warnings on
-      # stderr go to probe.log, so they can't break the JSON.
+      # The report goes to its own file: GLib prints some messages to stdout,
+      # so stdout and stderr both go to probe.log.
       - name: Run the preview probe
         id: probe
         run: |
           bin="$PWD/target/debug/tmpmail-gui"
           tmp="$(mktemp -d)"
+          report="$PWD/probe.json"
+          rm -f probe.json probe.log
           if [ "$RUNNER_OS" = Windows ]; then
             bin="$bin.exe"
             tmp="$(cygpath -w "$tmp")"
+            report="$(cygpath -w "$report")"
           fi
           export TMPMAIL_STATE_DIR="$tmp/state" TMPMAIL_CONFIG="$tmp/no-config.toml" TMPMAIL_GUI_PROBE=1
+          export TMPMAIL_GUI_PROBE_REPORT="$report"
           status=0
           if [ "$RUNNER_OS" = Linux ]; then
-            xvfb-run -a "$bin" > probe.json 2> probe.log || status=$?
+            xvfb-run -a "$bin" > probe.log 2>&1 || status=$?
           else
-            "$bin" > probe.json 2> probe.log || status=$?
+            "$bin" > probe.log 2>&1 || status=$?
           fi
           echo "status=$status" >> "$GITHUB_OUTPUT"
-          echo "The probe exited with $status. Its stderr:"
+          echo "The probe exited with $status. Its output:"
           cat probe.log
       # Required on every OS, Windows included: valid JSON with "pass": true,
       # and exit code 0.
