@@ -109,16 +109,85 @@ pub fn sanitize_mail_html(html: &str, allow_remote_images: bool, frame: Option<&
                 return None;
             }
         }
-        // Inline styles can fetch remote resources through url(...).
-        if attribute == "style"
-            && value.to_ascii_lowercase().contains("url(")
-            && !allow_remote_images
-        {
-            return None;
+        // Inline styles can fetch remote resources through url(...). The
+        // app's frame keeps the rest of the style (colors, spacing); the
+        // CLI's file drops the whole attribute, as it always has.
+        if attribute == "style" && !allow_remote_images {
+            if cid_base.is_some() {
+                return style_without_resources(value).map(Cow::Owned);
+            }
+            if value.to_ascii_lowercase().contains("url(") {
+                return None;
+            }
         }
         Some(Cow::Borrowed(value))
     });
     builder.clean(html).to_string()
+}
+
+/// A `style` attribute without the declarations that could load anything:
+/// `url(...)`, image functions, and CSS escapes (which could spell `url(`
+/// in a way a plain search misses). `None` when nothing is left.
+fn style_without_resources(style: &str) -> Option<String> {
+    let kept: Vec<&str> = declarations(style)
+        .into_iter()
+        .map(str::trim)
+        .filter(|d| {
+            let lower = d.to_ascii_lowercase();
+            !d.is_empty()
+                && !lower.contains('\\')
+                && ![
+                    "url(",
+                    "image(",
+                    "image-set(",
+                    "src(",
+                    "cross-fade(",
+                    "element(",
+                ]
+                .iter()
+                .any(|f| lower.contains(f))
+        })
+        .collect();
+    (!kept.is_empty()).then(|| kept.join(";"))
+}
+
+/// Splits CSS declarations at the semicolons outside quotes and brackets,
+/// so `url(data:image/png;base64,...)` stays one declaration.
+fn declarations(style: &str) -> Vec<&str> {
+    let (mut out, mut start, mut depth, mut quote) = (Vec::new(), 0, 0usize, None);
+    let mut chars = style.char_indices();
+    while let Some((i, c)) = chars.next() {
+        match (quote, c) {
+            (Some(_), '\\') => {
+                chars.next();
+            }
+            (Some(q), _) if c == q => quote = None,
+            (Some(_), _) => {}
+            (None, '"' | '\'') => quote = Some(c),
+            (None, '(') => depth += 1,
+            (None, ')') => depth = depth.saturating_sub(1),
+            (None, ';') if depth == 0 => {
+                out.push(&style[start..i]);
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    out.push(&style[start..]);
+    out
+}
+
+/// Whether sanitized mail HTML sets colors or backgrounds of its own
+/// (`bgcolor`, or `color`/`background` in a `style`). The app shows such
+/// mail inverted in dark mode, and mail without colors in the theme's own.
+pub fn has_own_colors(sanitized: &str) -> bool {
+    static STYLED: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(
+            r#"(?i)\sbgcolor="|\sstyle="(?:[^"]*[;\s])?(?:background(?:-color)?|color)\s*:"#,
+        )
+        .unwrap()
+    });
+    STYLED.is_match(sanitized)
 }
 
 /// Whether a URL is plain `http:` as a browser would parse it: leading
@@ -252,6 +321,37 @@ mod tests {
         assert!(!off.contains("example"), "{off}");
         // The CLI's file keeps both; its policy allows http too.
         assert!(sanitize_mail_html(html, true, None).contains("b.example"));
+    }
+
+    #[test]
+    fn frame_mode_strips_only_style_resources() {
+        let frame = Frame { cid_base: "x:" };
+        let html = r#"<p style="color:red; background:url(https://t.example/x) ; padding:4px">a</p>
+            <p style="background-image:url('data:image/png;base64,AA==');margin:0">b</p>
+            <p style="b\61ckground:u\72l(https://t.example/y);color:blue">c</p>
+            <p style="background:-webkit-image-set('https://t.example/z' 1x)">d</p>"#;
+        let off = sanitize_mail_html(html, false, Some(&frame));
+        assert!(!off.contains("example"), "{off}");
+        assert!(!off.contains("base64"), "{off}");
+        assert!(off.contains(r#"style="color:red;padding:4px""#), "{off}");
+        assert!(off.contains(r#"style="margin:0""#), "{off}");
+        assert!(off.contains(r#"style="color:blue""#), "{off}");
+        assert!(off.contains("<p>d</p>"), "{off}");
+        // With images on, styles stay as the sender wrote them.
+        let on = sanitize_mail_html(html, true, Some(&frame));
+        assert!(on.contains("url(https://t.example/x)"), "{on}");
+    }
+
+    #[test]
+    fn own_colors_are_detected() {
+        assert!(has_own_colors(r##"<td bgcolor="#fff">x</td>"##));
+        assert!(has_own_colors(r##"<p style="margin:0; color:#333">x</p>"##));
+        assert!(has_own_colors(
+            r#"<div style="background-color:red">x</div>"#
+        ));
+        assert!(!has_own_colors(r#"<p style="border-color:red">x</p>"#));
+        assert!(!has_own_colors("<p>color: red</p>"));
+        assert!(!has_own_colors("<pre>plain</pre>"));
     }
 
     #[test]
