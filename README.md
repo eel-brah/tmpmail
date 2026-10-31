@@ -382,6 +382,8 @@ cargo clippy --all-targets
 vhs assets/demo/demo.tape   # re-record the demo (needs vhs, and outbound SMTP for the test mail)
 ```
 
+A desktop app is in early development in [`gui/`](gui/README.md). It is not released yet.
+
 ## License
 
 GPL-3.0-or-later. See [LICENSE](LICENSE).

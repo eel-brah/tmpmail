@@ -1,0 +1,23 @@
+[package]
+name = "tmpmail-gui"
+version = "0.0.0"
+edition = "2024"
+description = "Desktop app for tmpmail (in development)"
+license = "GPL-3.0-or-later"
+rust-version = "1.90"
+publish = false
+
+[[bin]]
+name = "tmpmail-gui"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2.7.4", features = [] }
+
+[dependencies]
+# The core only: no clap, ratatui or qrcode.
+tmpmail = { path = "../..", default-features = false }
+tauri = { version = "2.12.5", features = [] }
+tauri-plugin-opener = "2.7.2"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"

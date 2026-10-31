@@ -86,7 +86,11 @@ pub fn sanitize_mail_html(html: &str, allow_remote_images: bool, frame: Option<&
         .link_rel(Some("noopener noreferrer nofollow"))
         .url_schemes(HashSet::from(["http", "https", "mailto", "cid", "data"]));
     if frame.is_some() {
-        builder.set_tag_attribute_value("a", "target", "_blank");
+        // Image-map areas are links too; without a target they would
+        // navigate the frame itself.
+        builder
+            .set_tag_attribute_value("a", "target", "_blank")
+            .set_tag_attribute_value("area", "target", "_blank");
     }
     let cid_base = frame.map(|f| f.cid_base.to_string());
     builder.attribute_filter(move |element, attribute, value| {
@@ -203,12 +207,13 @@ mod tests {
 
     #[test]
     fn frame_mode_opens_links_in_popups_and_serves_cid_images() {
-        let html = r#"<a href="https://example.com/">go</a><img src="cid:logo@x y">"#;
+        let html = r#"<a href="https://example.com/">go</a><img src="cid:logo@x y">
+            <map name="m"><area href="https://example.com/a" shape="rect"></map>"#;
         let frame = Frame {
             cid_base: "tmpmail-mail://localhost/m1/cid/",
         };
         let body = sanitize_mail_html(html, false, Some(&frame));
-        assert!(body.contains(r#"target="_blank""#), "{body}");
+        assert_eq!(body.matches(r#"target="_blank""#).count(), 2, "{body}");
         assert!(
             body.contains(r#"src="tmpmail-mail://localhost/m1/cid/logo%40x%20y""#),
             "{body}"

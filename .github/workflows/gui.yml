@@ -1,0 +1,67 @@
+name: gui
+# The desktop app (in development): build it on each OS and run the preview
+# security probe on that OS's webview. No packaging or release yet.
+on:
+  push:
+    paths: ["gui/**", "src/**", "Cargo.*", ".github/workflows/gui.yml"]
+  pull_request:
+    paths: ["gui/**", "src/**", "Cargo.*", ".github/workflows/gui.yml"]
+jobs:
+  gui:
+    strategy:
+      fail-fast: false
+      matrix:
+        # 22.04 for the glibc floor of future Linux bundles (move to 24.04
+        # before 2027-04-17, when 22.04 runners are retired).
+        os: [ubuntu-22.04, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Install WebKitGTK and friends
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf xvfb
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+      - name: Frontend install, type check, lint and build
+        working-directory: gui
+        run: |
+          corepack enable
+          pnpm install --frozen-lockfile
+          pnpm check
+          pnpm lint
+          pnpm build
+      - run: cargo clippy -p tmpmail-gui --all-targets -- -D warnings
+      - run: cargo test -p tmpmail-gui
+      - name: Build the app (debug, with the probe)
+        working-directory: gui
+        run: pnpm tauri build --debug --no-bundle
+      - name: Run the preview probe
+        run: |
+          bin="$PWD/target/debug/tmpmail-gui"
+          tmp="$(mktemp -d)"
+          if [ "$RUNNER_OS" = Windows ]; then
+            bin="$bin.exe"
+            tmp="$(cygpath -w "$tmp")"
+          fi
+          export TMPMAIL_STATE_DIR="$tmp/state" TMPMAIL_CONFIG="$tmp/no-config.toml" TMPMAIL_GUI_PROBE=1
+          if [ "$RUNNER_OS" = Linux ]; then
+            xvfb-run -a "$bin" | tee probe.json
+          else
+            "$bin" | tee probe.json
+          fi
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: probe-${{ matrix.os }}
+          path: probe.json
+          if-no-files-found: ignore

@@ -1,0 +1,5 @@
+# Supply-chain settings (see mds/gui-plan.md): only versions published at
+# least 7 days ago, and no install scripts unless listed here.
+minimumReleaseAge: 10080
+strictDepBuilds: true
+onlyBuiltDependencies: []

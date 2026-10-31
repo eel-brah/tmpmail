@@ -1,0 +1,15 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "main",
+  "description": "The main window: the app's own commands and event listening, nothing else. Links are opened from Rust, so no opener permission is granted.",
+  "windows": ["main"],
+  "permissions": [
+    "core:event:allow-listen",
+    "core:event:allow-unlisten",
+    "allow-init",
+    "allow-create-inbox",
+    "allow-select-inbox",
+    "allow-open-message",
+    "allow-probe-finish"
+  ]
+}

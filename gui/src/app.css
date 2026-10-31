@@ -1,0 +1,76 @@
+@import "tailwindcss";
+
+/* Design tokens. Steel-blue paper and postmark-blue ink: a mail tool that
+   reads like a sorting office, not a chat app. Dark mode swaps the values. */
+@theme {
+  --color-canvas: #e9edf2;
+  --color-panel: #f8fafc;
+  --color-raised: #ffffff;
+  --color-ink: #18202b;
+  --color-muted: #586374;
+  --color-faint: #8a94a3;
+  --color-rule: #d3dae3;
+  --color-accent: #2c56c9;
+  --color-accent-soft: #dce5fa;
+  --color-on-accent: #ffffff;
+  --color-alert: #a3401c;
+  --color-alert-soft: #f8e3da;
+
+  --font-sans: system-ui, -apple-system, "Segoe UI", "Cantarell", "Noto Sans", sans-serif;
+
+  /* Type scale: 12 / 13 / 14 / 17 / 22. */
+  --text-2xs: 0.75rem;
+  --text-xs: 0.8125rem;
+  --text-sm: 0.875rem;
+  --text-md: 1.0625rem;
+  --text-lg: 1.375rem;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --color-canvas: #12161c;
+    --color-panel: #181d25;
+    --color-raised: #1f2530;
+    --color-ink: #e3e8ef;
+    --color-muted: #9aa5b5;
+    --color-faint: #6c7686;
+    --color-rule: #2a313d;
+    --color-accent: #7f9ff5;
+    --color-accent-soft: #232f4d;
+    --color-on-accent: #0e1420;
+    --color-alert: #f0987a;
+    --color-alert-soft: #3a231b;
+  }
+}
+
+:root {
+  color-scheme: light dark;
+}
+
+html,
+body,
+#app {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--color-canvas);
+  color: var(--color-ink);
+  font-family: var(--font-sans);
+  font-size: var(--text-sm);
+  line-height: 1.45;
+  -webkit-font-smoothing: antialiased;
+}
+
+:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    transition: none !important;
+    animation: none !important;
+  }
+}
