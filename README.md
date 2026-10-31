@@ -55,6 +55,8 @@ for `copy` (Windows has `clip.exe`), a browser for `read --html` (found through 
 Windows a PowerShell toast), and `less` for long messages (without it, Windows prints them).
 CI runs the tests on Linux, macOS and Windows.
 
+Rather have a window? The [desktop app](#desktop-app-preview) is in preview.
+
 ## Use it
 
 ### In a script or CI
@@ -119,17 +121,55 @@ verification code is highlighted, and `y` copies it.
 The [guide](#guide) below shows each feature in a few lines, and [all commands](#commands)
 are listed under Reference.
 
-### Desktop app (in development)
+### Desktop app (preview)
 
-A desktop app for people who'd rather not live in a terminal is being built in
-[`gui/`](gui/README.md), on the same inboxes as the CLI. It shows your inboxes and their
-mail live, puts the verification code in a big banner with a Copy button, lists the
-verification link first, previews HTML mail safely (light or dark), saves attachments (or
-drags them out on Linux and macOS), and creates and deletes inboxes and messages, with the
-TUI's keyboard shortcuts. It notifies you of new mail (with the code, if there is one) while
-it's in the background, can sit in the tray and keep checking with the window closed, and
-has a settings screen for the provider order, checking and the desktop options, written to
-the same `config.toml` as the CLI's. It isn't released yet: run it from source with Rust 1.90+, Node 24 and pnpm:
+For people who'd rather not live in a terminal, tmpmail also comes as a desktop app for
+Linux, macOS and Windows, on the same inboxes and `config.toml` as the CLI. It shows your
+inboxes and their mail live, puts the verification code in a big banner with a Copy button,
+lists the verification link first, previews HTML mail safely (light or dark), saves
+attachments (or drags them out on Linux and macOS), and creates and deletes inboxes and
+messages, with the TUI's keyboard shortcuts. It notifies you of new mail (with the code, if
+there is one) while it's in the background, can sit in the tray and keep checking with the
+window closed, and has a settings screen. [More](gui/README.md).
+
+![The tmpmail desktop app showing a verification code in a banner above the mail](assets/desktop.png)
+
+<sub>Sample mail.</sub>
+
+It is a **preview**: tested on Linux, built and security-probed in CI on macOS and Windows,
+but not yet tried there by hand. Downloads are on the
+[releases page](https://github.com/qorvyx/tmpmail/releases), under the `gui-v*` releases
+(`https://github.com/qorvyx/tmpmail/releases/download/gui-vVERSION/FILE`), each with
+`SHA256SUMS` and a build attestation (`gh attestation verify FILE --repo qorvyx/tmpmail`):
+
+| System | File |
+|---|---|
+| Windows 10/11 (x64) | `tmpmail-desktop-VERSION-x64-setup.exe` |
+| macOS 10.15+ (Apple silicon and Intel) | `tmpmail-desktop-VERSION-universal.dmg` |
+| Debian, Ubuntu (x86_64) | `tmpmail-desktop-VERSION-amd64.deb` |
+| Fedora and other RPM-based (x86_64) | `tmpmail-desktop-VERSION-x86_64.rpm` |
+| Other Linux (x86_64) | `tmpmail-desktop-VERSION-x86_64.AppImage` |
+
+The app isn't signed with a paid certificate, so each system warns once:
+
+- **macOS:** open the DMG and drag tmpmail to Applications. Open it once; macOS refuses.
+  Then go to System Settings → Privacy & Security, click **Open Anyway** next to the
+  message about tmpmail, and enter your password. On macOS 15 (Sequoia) and later,
+  Control-click → Open no longer skips this. If you trust the download,
+  `xattr -dr com.apple.quarantine /Applications/tmpmail.app` does the same from a terminal.
+- **Windows:** SmartScreen says "Windows protected your PC": click **More info**, then
+  **Run anyway**. The installer installs for your user only (no admin prompt) and fetches
+  WebView2 if it's missing. **Smart App Control blocks it outright**, with no way past for
+  one app; it can only be turned off as a whole.
+- **Linux:** `sudo apt install ./tmpmail-desktop-VERSION-amd64.deb` or
+  `sudo dnf install ./tmpmail-desktop-VERSION-x86_64.rpm` (both pull in WebKitGTK 4.1), or
+  `chmod +x` the AppImage and run it (it may need `libfuse2`; without FUSE, add
+  `--appimage-extract-and-run`). On NVIDIA, if the window stays blank, start it with
+  `WEBKIT_DISABLE_DMABUF_RENDERER=1`.
+
+If you use the CLI too, use **tmpmail 0.3.0 or later**: the app's settings screen can write
+the `http_timeout` key, which 0.2.0 refuses (0.3.0 and later warn about keys they don't
+know). To run the app from source instead, with Rust 1.90+, Node 24 and pnpm:
 
 ```sh
 cd gui && pnpm install && pnpm tauri dev
@@ -410,8 +450,8 @@ gives the providers, stored inboxes, watcher and mail sanitizing (`tmpmail::prov
 `tmpmail::store`, `tmpmail::watcher`, ...) without the CLI's dependencies. Its API isn't
 stable yet.
 
-A desktop app is in development in [`gui/`](gui/README.md) (see
-[Desktop app](#desktop-app-in-development)). It is not released yet.
+The desktop app is in [`gui/`](gui/README.md) (see [Desktop app](#desktop-app-preview)),
+with its own `gui-v*` releases.
 
 ## License
 

@@ -1,0 +1,209 @@
+# Builds the desktop app's installers on a `gui-v*` tag and publishes them as
+# a GitHub pre-release with SHA256SUMS. Every file gets a build provenance
+# attestation, checked with `gh attestation verify FILE --repo qorvyx/tmpmail`.
+# Running it by hand (workflow_dispatch) only builds, as a dry run; the
+# installers are then in the run's artifacts.
+# The CLI's release.yml runs on `v*`, which `gui-v*` doesn't match, and this
+# one doesn't match `v*` tags, so a tag never starts both.
+# The builds are unsigned (macOS: ad-hoc signed); see gui/README.md.
+# Actions are pinned by commit SHA, with the tag in a comment.
+name: gui-release
+on:
+  push:
+    tags: ["gui-v*"]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  # Stops before any build if the three version fields disagree, if the
+  # release notes aren't about that version, if the tag isn't it (`gui-v0.1.0`
+  # for 0.1.0), or if Cargo.lock is stale.
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.check.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Tag matches the app's version
+        id: check
+        shell: bash
+        run: |
+          cargo metadata --locked --format-version 1 >/dev/null
+          crate=$(cargo metadata --no-deps --format-version 1 \
+            | jq -r '.packages[] | select(.name == "tmpmail-gui") | .version')
+          conf=$(jq -r .version gui/src-tauri/tauri.conf.json)
+          pkg=$(jq -r .version gui/package.json)
+          echo "Cargo.toml $crate, tauri.conf.json $conf, package.json $pkg"
+          if [ -z "$crate" ] || [ "$crate" != "$conf" ] || [ "$crate" != "$pkg" ]; then
+            echo "::error::gui/src-tauri/Cargo.toml, gui/src-tauri/tauri.conf.json and gui/package.json must have the same version"
+            exit 1
+          fi
+          if ! grep -q "tmpmail-desktop-$crate-" gui/RELEASE_NOTES.md; then
+            echo "::error::gui/RELEASE_NOTES.md doesn't name the $crate files"
+            exit 1
+          fi
+          echo "version=$crate" >> "$GITHUB_OUTPUT"
+          if [ "$GITHUB_REF_TYPE" != tag ]; then
+            echo "Not a tag: a dry run of $crate"
+            exit 0
+          fi
+          if [ "${GITHUB_REF_NAME#gui-v}" != "$crate" ]; then
+            echo "::error::tag $GITHUB_REF_NAME doesn't match the app's version $crate"
+            exit 1
+          fi
+          echo "Tag $GITHUB_REF_NAME matches the app's version"
+
+  build:
+    needs: version
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # 22.04 for the glibc floor (move to 24.04 before 2027-04-17, when
+          # 22.04 runners are retired; never ubuntu-latest for bundles).
+          - { os: ubuntu-22.04, bundles: "deb,rpm,appimage" }
+          # One universal app (Apple silicon and Intel) from the arm64 runner.
+          - os: macos-latest
+            bundles: app
+            target: universal-apple-darwin
+            rust-targets: aarch64-apple-darwin,x86_64-apple-darwin
+          - { os: windows-latest, bundles: nsis }
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+    defaults:
+      run:
+        shell: bash
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+      TARGET: ${{ matrix.target }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable branch, 2026-10-31
+        with:
+          toolchain: stable
+          targets: ${{ matrix.rust-targets }}
+      - name: Install WebKitGTK and friends
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf xdg-utils
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+      - name: Frontend install
+        working-directory: gui
+        run: |
+          corepack enable
+          pnpm install --frozen-lockfile
+      # No cache on purpose: a release build starts clean.
+      - name: Build the installers
+        working-directory: gui
+        env:
+          BUNDLES: ${{ matrix.bundles }}
+        run: |
+          args=(--ci)
+          [ -z "$TARGET" ] || args+=(--target "$TARGET")
+          pnpm tauri build "${args[@]}" --bundles "$BUNDLES"
+          # macOS: the .app above, then the DMG on its own (nothing is
+          # compiled again). hdiutil fails now and then on runners with
+          # "Resource busy", so a failed DMG is tried once more.
+          if [ "$RUNNER_OS" = macOS ]; then
+            dmg="../target/$TARGET/release/bundle/dmg"
+            if ! pnpm tauri build "${args[@]}" --bundles dmg; then
+              echo "::warning::DMG creation failed; retrying once"
+              rm -f "$dmg"/*.dmg
+              sleep 15
+              pnpm tauri build "${args[@]}" --bundles dmg
+            fi
+          fi
+      - name: Collect the installers
+        run: |
+          release="target/${TARGET:+$TARGET/}release"
+          bundle="$release/bundle"
+          bin="$release/tmpmail-gui"
+          [ "$RUNNER_OS" != Windows ] || bin="$bin.exe"
+          # The preview probe exists only in debug builds.
+          if grep -a -q TMPMAIL_GUI_PROBE "$bin"; then
+            echo "::error::$bin contains the preview probe"
+            exit 1
+          fi
+          mkdir out
+          name="tmpmail-desktop-$VERSION"
+          case "$RUNNER_OS" in
+            Linux)
+              cp "$bundle/deb/tmpmail_${VERSION}_amd64.deb" "out/$name-amd64.deb"
+              cp "$bundle/rpm/tmpmail-$VERSION-1.x86_64.rpm" "out/$name-x86_64.rpm"
+              cp "$bundle/appimage/tmpmail_${VERSION}_amd64.AppImage" "out/$name-x86_64.AppImage"
+              ;;
+            macOS)
+              cp "$bundle/dmg/tmpmail_${VERSION}_universal.dmg" "out/$name-universal.dmg"
+              ;;
+            Windows)
+              cp "$bundle/nsis/tmpmail_${VERSION}_x64-setup.exe" "out/$name-x64-setup.exe"
+              ;;
+          esac
+          ls -l out
+      # The whole bundle must carry an ad-hoc signature: with only the
+      # linker's signature on the executable, Apple silicon calls the app
+      # "damaged". Checked on the app inside the DMG, as shipped.
+      - name: Check the macOS signature
+        if: runner.os == 'macOS'
+        run: |
+          archs=$(lipo -archs "target/$TARGET/release/tmpmail-gui")
+          echo "architectures: $archs"
+          for a in arm64 x86_64; do
+            grep -qw "$a" <<<"$archs" || { echo "::error::no $a in the universal binary"; exit 1; }
+          done
+          mnt="$(mktemp -d)"
+          hdiutil attach -nobrowse -readonly -mountpoint "$mnt" out/*.dmg
+          status=0
+          codesign --verify --deep --strict --verbose=2 "$mnt/tmpmail.app" || status=$?
+          codesign -dv "$mnt/tmpmail.app" 2>&1 | grep -E '^(Identifier|Format|Signature|CodeDirectory)' || true
+          hdiutil detach "$mnt"
+          exit "$status"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: gui-${{ matrix.os }}
+          path: out/*
+          if-no-files-found: error
+
+  release:
+    needs: [version, build]
+    # A tag push only: a manual run is a dry run even when started on a tag.
+    if: github.event_name == 'push' && github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          path: dist
+          pattern: gui-*
+          merge-multiple: true
+      - run: cd dist && sha256sum tmpmail-desktop-* > SHA256SUMS && cat SHA256SUMS
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: |
+            dist/tmpmail-desktop-*
+            dist/SHA256SUMS
+      # A pre-release, never marked latest: the CLI's releases stay the
+      # repository's latest release.
+      - env:
+          GH_TOKEN: ${{ github.token }}
+        run: >
+          gh release create "$GITHUB_REF_NAME" dist/*
+          --repo "$GITHUB_REPOSITORY" --verify-tag --prerelease --latest=false
+          --title "tmpmail desktop $VERSION (preview)"
+          --notes-file gui/RELEASE_NOTES.md

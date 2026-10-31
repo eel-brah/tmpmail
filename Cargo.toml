@@ -12,8 +12,8 @@ categories = ["command-line-utilities", "email"]
 include = ["/src", "/docs", "/README.md", "/LICENSE", "/Cargo.lock"]
 
 [workspace]
-# The desktop app (in development, not released). Plain `cargo build` and
-# `cargo test` here still only build the CLI.
+# The desktop app (released on its own `gui-v*` tags). Plain `cargo build`
+# and `cargo test` here still only build the CLI.
 members = [".", "gui/src-tauri"]
 
 # Lets `cargo binstall tmpmail` fetch the release archive instead of building.

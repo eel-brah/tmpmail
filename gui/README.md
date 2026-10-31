@@ -1,10 +1,11 @@
 <p align="center"><img src="src/assets/logo.svg" alt="" width="72" height="72"></p>
 
-# tmpmail desktop app (in development)
+# tmpmail desktop app (preview)
 
 A Tauri 2 window on top of tmpmail's core library, with the same inboxes as the CLI (same
 `state.json` and config). Inboxes, live mail, the verification code one click (or `y`) away,
-a safe HTML preview in light or dark, and the TUI's actions and keys. Not released yet.
+a safe HTML preview in light or dark, and the TUI's actions and keys. Released as a
+preview on `gui-v*` tags; install steps are in the [main README](../README.md#desktop-app-preview).
 
 ## Features
 
@@ -143,7 +144,7 @@ script, and Rust picks the colors when it builds the document:
 - Node 24, and pnpm through corepack: `corepack enable --install-directory ~/.local/bin pnpm`
   (user-level), or prefix every command with `corepack`.
 - Linux: WebKitGTK 4.1 and friends. Debian/Ubuntu:
-  `libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf`; Fedora:
+  `libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf`; Fedora:
   `webkit2gtk4.1-devel librsvg2-devel libappindicator-gtk3-devel`. On NVIDIA, a blank window
   is fixed by `WEBKIT_DISABLE_DMABUF_RENDERER=1`. On pure Wayland, copying needs a
   compositor with clipboard data-control support.
@@ -165,6 +166,71 @@ mail scheme and every navigation.
 The interface uses the system UI font for body text and headings (no font is bundled), and
 the system monospace font for the verification code. Icons are inline SVG in
 `src/lib/Icon.svelte`, drawn after Lucide's (ISC), so no icon package is needed.
+
+## Installers and releases
+
+The app has its own version, independent of the CLI's, in three files that must agree:
+`src-tauri/tauri.conf.json`, `src-tauri/Cargo.toml` and `package.json` (then
+`cargo metadata` at the root refreshes `Cargo.lock`).
+
+Build the installers for the system you're on (release build, no probe):
+
+```sh
+CARGO_BUILD_JOBS=4 pnpm tauri build                     # Linux: .deb, .rpm, AppImage
+pnpm tauri build --target universal-apple-darwin        # macOS: universal .app and .dmg (both rust targets installed)
+pnpm tauri build --bundles nsis                         # Windows: -setup.exe
+```
+
+They land in the workspace's `target/` (`target/release/bundle/{deb,rpm,appimage}`, or
+`target/universal-apple-darwin/release/bundle/dmg`), not under `gui/`. Bundle settings are
+in `tauri.conf.json`:
+
+- **Linux:** built on Ubuntu 22.04 for an old glibc. The bundler writes the dependencies
+  itself: the `.deb` depends on `libwebkit2gtk-4.1-0`, `libgtk-3-0` and the tray library it
+  was built against (`libayatana-appindicator3-1` in CI, which `gui.yml` builds against
+  too); the `.rpm` requires the same libraries by their `.so` names
+  (`libwebkit2gtk-4.1.so.0`, ...), so it isn't tied to Fedora's package names. The AppImage carries WebKitGTK and the tray library, without
+  GStreamer (the app plays no media), and takes GTK, Wayland and GL from the system, as
+  AppImages do. The desktop file is `tmpmail.desktop` with
+  `StartupWMClass=tmpmail-gui`, which is the window's X11 class and its Wayland app ID
+  (GTK takes both from the binary's name, since `enableGTKAppId` is off), so docks show the
+  tmpmail icon.
+- **macOS:** one universal app (Apple silicon and Intel), macOS 10.15 or later, **ad-hoc
+  signed** (`signingIdentity: "-"`): with no signature on the whole bundle, Apple silicon
+  reports the app as "damaged" with no way past. It isn't notarized, so users go through
+  Open Anyway once.
+- **Windows:** an NSIS installer only (no MSI), per user (no admin prompt), with the
+  WebView2 bootstrapper that downloads WebView2 if it's missing.
+- **Release builds contain no probe**: `probe.rs` and everything that calls it are
+  `#[cfg(debug_assertions)]`, and the release workflow fails if the binary contains
+  `TMPMAIL_GUI_PROBE`. The caller check and the closed `postMessage` route are in every
+  build.
+
+### Releasing
+
+`.github/workflows/gui-release.yml` runs on a `gui-v*` tag (the CLI's `release.yml` runs on
+`v*`, which doesn't match it):
+
+1. Set the version in the three files above, update `RELEASE_NOTES.md` (the release's
+   text), commit, then tag `gui-vX.Y.Z` and push the tag.
+2. A first job stops the run if the three versions differ, if the tag isn't `gui-v` plus
+   that version, or if `Cargo.lock` is stale.
+3. Builds on `ubuntu-22.04`, `macos-latest` (universal) and `windows-latest`. A failed
+   macOS build is retried once (DMG creation is flaky on runners), and the signature of the
+   app inside the DMG is checked with `codesign --verify --deep --strict`.
+4. One publish job writes `SHA256SUMS`, attests every file
+   (`gh attestation verify FILE --repo qorvyx/tmpmail`), and creates a **pre-release**
+   titled "tmpmail desktop X.Y.Z (preview)", never marked latest (the CLI's release stays
+   the latest), with `RELEASE_NOTES.md` as its notes.
+
+Running the workflow by hand (`workflow_dispatch`) is a dry run: it builds and uploads the
+installers as run artifacts, without a release. Files are named
+`tmpmail-desktop-X.Y.Z-{x64-setup.exe,universal.dmg,amd64.deb,x86_64.rpm,x86_64.AppImage}`.
+
+`scripts/homebrew-cask.sh VERSION SHA256SUMS` prints a cask (`tmpmail-desktop`) for the
+DMG, with a caveat explaining Open Anyway, for `qorvyx/homebrew-tap`. It isn't run in CI
+yet: the cask waits until the app is out of pre-release. No updater yet either: it would
+need its own minisign key, backed up before the first release that uses it.
 
 ## The preview probe
 

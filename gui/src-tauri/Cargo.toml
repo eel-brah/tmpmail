@@ -1,8 +1,8 @@
 [package]
 name = "tmpmail-gui"
-version = "0.0.0"
+version = "0.1.0"
 edition = "2024"
-description = "Desktop app for tmpmail (in development)"
+description = "Desktop app for tmpmail"
 license = "GPL-3.0-or-later"
 rust-version = "1.90"
 publish = false

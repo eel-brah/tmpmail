@@ -1,6 +1,6 @@
 name: gui
-# The desktop app (in development): build it on each OS and run the preview
-# security probe on that OS's webview. No packaging or release yet.
+# The desktop app: build it on each OS and run the preview security probe on
+# that OS's webview. Installers and releases are gui-release.yml's job.
 on:
   push:
     paths: ["gui/**", "src/**", "Cargo.*", ".github/workflows/gui.yml"]
@@ -28,7 +28,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf xvfb
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf xvfb
       - uses: actions/setup-node@v7
         with:
           node-version: 24
