@@ -247,7 +247,9 @@ fn popup(app: &tauri::AppHandle, shared: &Shared, url: &Url) {
 }
 
 fn main() {
-    // Before GTK starts, which would set it from the binary's name.
+    // Before GTK starts, which would set it from the binary's name. It is
+    // also the tray icon's title on Linux (libappindicator's `Title` falls
+    // back to the application name, and that to the program name).
     #[cfg(target_os = "linux")]
     gtk::glib::set_prgname(Some(PROGRAM));
     #[cfg(debug_assertions)]
