@@ -21,6 +21,8 @@ has only been checked by the automated security probe. Please report what breaks
   list them under the app's notification settings.
 - **Linux: in KDE's notification history, the button that opens the message reads
   "Open"** (it was Plasma's default, "View").
+- **No more "New mail" notice for the message a notification click just opened**: the
+  in-app notice for it now goes away; notices about other new mail stay.
 - **Linux on Wayland: the window fits the screen.** It opened at 1240×780 whatever the
   screen, so on a 1280×800 screen its bottom (Settings' Save button, the toasts) was behind
   KDE's panel: GTK can't read the work area there. It now leaves room for the panels.

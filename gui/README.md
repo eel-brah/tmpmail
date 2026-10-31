@@ -17,7 +17,10 @@ preview on `gui-v*` tags; install steps are in the [main README](../README.md#de
   stream is up (it stays on through a quick reconnect), and "Public" for Maildrop.
 - **Live mail:** the same worker loop as the TUI (`tmpmail::watcher`: polling, push
   streams, state reloads so CLI changes show up within ~5 s). New mail is marked New, and a
-  notice names the sender and subject with an Open button.
+  notice names the sender and subject with an Open button. A notice about one message goes
+  away once that message is opened (by a notification click, the list or the keyboard; one
+  that also names other new mail stays); mail already read when it is listed (a
+  notification click opened it first) gets neither the notice nor the mark.
 - **Messages:** unread dot (opening a message marks it read, saved in `state.json` so the
   CLI's `ls` and the TUI agree; the sidebar badge counts the rest), sender, subject, time and
   attachment icon; filter by sender or subject (`/`); delete (asks first) where the provider supports it.

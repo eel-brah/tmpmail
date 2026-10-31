@@ -26,6 +26,8 @@ export interface Toast {
   kind: "error" | "info" | "success" | "mail";
   text: string;
   action?: { label: string; run: () => void };
+  /** The message a "New mail" toast's Open opens, and whether it names only that one. */
+  opens?: { address: string; id: string; only: boolean };
 }
 
 export type Confirm =
@@ -102,15 +104,24 @@ class AppState {
 
   // ---------- toasts ----------
 
-  toast(kind: Toast["kind"], text: string, action?: Toast["action"]) {
+  toast(kind: Toast["kind"], text: string, action?: Toast["action"], opens?: Toast["opens"]) {
     const id = ++this.#toastId;
-    this.toasts = [...this.toasts.slice(-3), { id, kind, text, action }];
+    this.toasts = [...this.toasts.slice(-3), { id, kind, text, action, opens }];
     const ms = kind === "error" ? 9000 : kind === "mail" ? 7000 : 3500;
     window.setTimeout(() => this.dismiss(id), ms);
   }
 
   dismiss(id: number) {
     this.toasts = this.toasts.filter((t) => t.id !== id);
+  }
+
+  /**
+   * Drops the "New mail" toast about this one message: it is open now (a
+   * notification click, say). One that names other new mail too stays.
+   */
+  #dropMailToasts(address: string, id: string) {
+    const about = (t: Toast) => t.opens?.only && t.opens.address === address && t.opens.id === id;
+    if (this.toasts.some(about)) this.toasts = this.toasts.filter((t) => !about(t));
   }
 
   /** Runs a command, turning a failure into an error toast. */
@@ -176,15 +187,21 @@ class AppState {
   // ---------- messages ----------
 
   open(s: Summary) {
-    if (!this.selected) return;
-    if (this.openId === s.id && this.opened) return;
-    this.openId = s.id;
+    if (this.selected) this.#openId(this.selected, s.id);
+  }
+
+  /** Opens a message of `address`, the selected inbox, listed or not yet (a notification click). */
+  #openId(address: string, id: string) {
+    // Open already; a failed open can be tried again.
+    if (this.openId === id && this.opened && !("error" in this.opened)) return;
+    this.openId = id;
     this.opened = null;
     this.images = false;
     this.original = false;
     this.source = false;
-    this.fresh.delete(freshKey(this.selected, s.id));
-    void this.#run(api.openMessage(this.selected, s.id));
+    this.fresh.delete(freshKey(address, id));
+    this.#dropMailToasts(address, id);
+    void this.#run(api.openMessage(address, id));
   }
 
   closeMessage() {
@@ -256,15 +273,8 @@ class AppState {
   reveal(address: string, id: string | null) {
     if (!this.inboxes.some((i) => i.address === address)) return;
     this.select(address);
-    if (!id) return;
-    const s = this.mail[address]?.messages.find((m) => m.id === id);
-    if (s) this.open(s);
-    else {
-      // Not listed here yet: open it by id.
-      this.openId = id;
-      this.opened = null;
-      void this.#run(api.openMessage(address, id));
-    }
+    // Listed here or not yet: opened by id.
+    if (id) this.#openId(address, id);
   }
 
   /** Opens what a notification click asked for before the inboxes were in. Returns whether it did. */
@@ -283,17 +293,21 @@ class AppState {
     const known = this.#known.get(address);
     if (known) {
       const arrived = list.filter((s) => !known.has(s.id));
-      for (const s of arrived) this.fresh.add(freshKey(address, s.id));
-      const newest = arrived[0];
+      // Neither marked New nor in a toast if opened already (a notification click came first).
+      const unopened = arrived.filter((s) => !s.seen && (address !== this.selected || s.id !== this.openId));
+      for (const s of unopened) this.fresh.add(freshKey(address, s.id));
+      const newest = unopened[0];
       if (newest) {
-        const more = arrived.length > 1 ? ` and ${arrived.length - 1} more` : "";
-        this.toast("mail", `${senderName(newest.from)}: ${newest.subject || "(no subject)"}${more}`, {
+        const more = unopened.length > 1 ? ` and ${unopened.length - 1} more` : "";
+        const text = `${senderName(newest.from)}: ${newest.subject || "(no subject)"}${more}`;
+        const open = {
           label: "Open",
           run: () => {
             this.select(address);
             this.open(newest);
           },
-        });
+        };
+        this.toast("mail", text, open, { address, id: newest.id, only: unopened.length === 1 });
       }
     }
     this.#known.set(address, new Set(list.map((s) => s.id)));
